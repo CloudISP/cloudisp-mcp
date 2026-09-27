@@ -1,6 +1,6 @@
 {
   "name": "cloudisp-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Servidor MCP de CloudISP para agentes de IA",
   "license": "MIT",
   "repository": {

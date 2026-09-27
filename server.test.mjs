@@ -406,7 +406,7 @@ test('stdio smoke: newline framing answers initialize and lists the eight tools 
     const initialize = messages.find((message) => message.id === 1);
     assert.equal(initialize.result.protocolVersion, '2025-06-18');
     assert.equal(initialize.result.serverInfo.name, 'cloudisp-mcp');
-    assert.equal(initialize.result.serverInfo.version, '0.2.0');
+    assert.equal(initialize.result.serverInfo.version, '0.2.1');
     assert.match(initialize.result.instructions, /CLOUDISP_ALLOW_WRITES=1/);
     assert.ok(initialize.result.capabilities.tools);
 
@@ -600,4 +600,16 @@ test('tools/list annotates read tools as read-only and disconnect as destructive
     const disconnect = writes.find((message) => message.id === 2).result.tools.find((tool) => tool.name === 'disconnect_subscriber');
     assert.equal(disconnect.annotations.destructiveHint, true);
     assert.equal(disconnect.annotations.readOnlyHint, false);
+});
+
+test('list_internet_profiles requests the full active list, not the default 20-row page', async () => {
+    const urls = [];
+    await dispatch('list_internet_profiles', {}, async (url) => {
+        urls.push(String(url));
+        return jsonResponse({ success: true, data: [], meta: { total: 0 } });
+    }, {});
+
+    assert.equal(urls.length, 1);
+    assert.ok(urls[0].includes('status=active'));
+    assert.ok(urls[0].includes('per_page=100'));
 });

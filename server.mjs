@@ -15,7 +15,7 @@
 import { pathToFileURL } from 'node:url';
 
 const SERVER_NAME = 'cloudisp-mcp';
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.2.1';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const API_PREFIX = '/api/v1/public';
 const REQUEST_TIMEOUT_MS = 30000;
@@ -375,14 +375,14 @@ async function findSubscriber(args, fetchImpl) {
 }
 
 /**
- * `list_internet_profiles` — `GET /internet-profiles?status=active`.
+ * `list_internet_profiles` — `GET /internet-profiles?status=active&per_page=100` (the API maximum; the default page is 20).
  *
  * @param {object} _args Tool arguments (unused).
  * @param {Function} fetchImpl `fetch`-compatible implementation.
  * @return {Promise<object>} Public API envelope.
  */
 async function listInternetProfiles(_args, fetchImpl) {
-    const response = await apiRequest(fetchImpl, 'GET', '/internet-profiles', { query: { status: 'active' } });
+    const response = await apiRequest(fetchImpl, 'GET', '/internet-profiles', { query: { status: 'active', per_page: 100 } });
 
     return isFailure(response) ? apiFailurePayload(response) : response.body;
 }
