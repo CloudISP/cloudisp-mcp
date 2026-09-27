@@ -1,0 +1,44 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [18, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  install-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install into a clean HOME
+        run: |
+          export HOME="$RUNNER_TEMP/h"; mkdir -p "$HOME"
+          CLOUDISP_MCP_REPO="$GITHUB_WORKSPACE" bash install.sh prod
+          f="$HOME/.config/cloudisp-mcp/prod.env"
+          mode=$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")
+          test "$mode" = 600
+          test -r "$HOME/.agents/skills/cloudisp-operator/SKILL.md"
+          test -x "$HOME/.local/share/cloudisp-mcp/bin/cloudisp-mcp"

@@ -1,0 +1,22 @@
+{
+  "name": "cloudisp-mcp",
+  "version": "0.2.0",
+  "description": "Servidor MCP de CloudISP para agentes de IA",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CloudISP/cloudisp-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "cloudisp",
+    "isp"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
