@@ -1,9 +1,10 @@
 # cloudisp-mcp
 
 Servidor [MCP](https://modelcontextprotocol.io) de CloudISP para agentes de IA:
-permite que Claude Code, Codex, pi, omp u opencode consulten (y, si lo habilitás,
-operen) tu plataforma CloudISP en lenguaje natural — buscar abonados, ver
-perfiles, órdenes de trabajo, técnicos y el estado de la red.
+permite que Claude Code, Codex, pi, omp, opencode u otro agente consulten (y, si
+lo habilitás, operen) tu plataforma CloudISP en lenguaje natural — abonados,
+diagnóstico, ONU y WiFi, OLTs y routers, reportes, órdenes de trabajo y el
+estado de la red.
 
 Es un proceso local sin dependencias: habla con la API pública de CloudISP
 (`/api/v1/public`) usando **tu** API key y nunca abre conexiones a bases de
@@ -40,9 +41,13 @@ registrar sin duplicar nada; tu archivo `.env` no se toca.
 ## Obtener una API key
 
 Las claves las emite CloudISP para tu plataforma. Por defecto se entregan con
-scopes de **solo lectura** (`:read`). Los scopes de escritura requieren un
-empleado responsable asociado a la clave. Pedila a
-[contacto@digitalnoa.com.ar](mailto:contacto@digitalnoa.com.ar).
+scopes de **solo lectura** (`:read`). Las herramientas nuevas piden además
+`devices:read` (lecturas de equipos y tareas), `reports:read` y `knowledge:read`;
+las de escritura piden `devices:operate`, `subscribers:write`,
+`work-orders:write` y `work-orders:assign`, y un empleado responsable asociado a
+la clave. Cada plataforma hija tiene además una **política** (`read` o
+`technician`, con tope diario de escrituras) que el admin aplica del lado del
+servidor. Pedila a [contacto@digitalnoa.com.ar](mailto:contacto@digitalnoa.com.ar).
 
 ## Configuración
 
@@ -82,7 +87,7 @@ codex mcp add cloudisp -- ~/.local/share/cloudisp-mcp/bin/cloudisp-mcp prod
 **omp** — `~/.omp/agent/mcp.json`
 
 ```json
-{ "mcpServers": { "cloudisp": { "type": "stdio", "command": "/home/vos/.local/share/cloudisp-mcp/bin/cloudisp-mcp", "args": ["prod"], "enabled": true, "timeout": 60000 } } }
+{ "mcpServers": { "cloudisp": { "type": "stdio", "command": "/home/vos/.local/share/cloudisp-mcp/bin/cloudisp-mcp", "args": ["prod"], "enabled": true, "timeout": 120000 } } }
 ```
 
 **pi** — requiere el adaptador MCP (`pi install npm:pi-mcp-adapter`); `~/.pi/agent/mcp.json`
@@ -94,38 +99,104 @@ codex mcp add cloudisp -- ~/.local/share/cloudisp-mcp/bin/cloudisp-mcp prod
 **opencode** — `~/.config/opencode/opencode.json`
 
 ```json
-{ "mcp": { "cloudisp": { "type": "local", "command": ["/home/vos/.local/share/cloudisp-mcp/bin/cloudisp-mcp", "prod"], "enabled": true, "timeout": 60000 } } }
+{ "mcp": { "cloudisp": { "type": "local", "command": ["/home/vos/.local/share/cloudisp-mcp/bin/cloudisp-mcp", "prod"], "enabled": true, "timeout": 120000 } } }
 ```
 
 Skills: enlazá cada carpeta de `skills/` en `~/.claude/skills` (Claude Code),
 `~/.agents/skills` (Codex, pi, opencode) y `~/.omp/agent/skills` (omp).
 
+**Hermes** — `~/.hermes/profiles/<perfil>/config.yaml`; el servidor en modo
+`untrusted` hace que cada herramienta sin `readOnlyHint` pida aprobación humana:
+
+```yaml
+mcp_servers:
+  cloudisp:
+    command: /home/hermes/.local/share/cloudisp-mcp/bin/cloudisp-mcp
+    args: [prod]
+    trust: untrusted
+    timeout: 120
+```
+
+Las herramientas de equipo esperan hasta 40 s por el resultado (el cambio de
+WiFi hace una lectura y una escritura: hasta ~85 s), así que el timeout del
+cliente tiene que ser de **120 s** como mínimo.
+
 ## Herramientas
 
-| Herramienta | Scope | Tipo |
-| --- | --- | --- |
-| `find_subscriber` | `subscribers:read` | lectura |
-| `list_internet_profiles` | `profiles:read` | lectura |
-| `find_work_orders` | `work-orders:read` | lectura |
-| `find_technician` | `employees:read` | lectura |
-| `network_snapshot` | `operations:read` | lectura |
-| `change_subscriber_bandwidth` | `subscribers:write` | escritura |
-| `disconnect_subscriber` | `subscribers:write` (+ `work-orders:write`) | escritura |
-| `assign_installation` | `work-orders:assign` | escritura |
+Las lecturas llevan `readOnlyHint: true` (también las de equipo, que no
+modifican nada). Las escrituras llevan `readOnlyHint: false`, su descripción
+empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
+`requested_by` e `idempotency_key`.
 
-Las herramientas de escritura usan `Idempotency-Key`: reintentar con la misma
-clave no repite la acción.
+| Herramienta | Endpoint | Scope | Tipo |
+| --- | --- | --- | --- |
+| `cloudisp_context` | `GET /agent/context` | `knowledge:read` | lectura |
+| `search_knowledge` | `GET /agent/knowledge?q=` · `/agent/knowledge/{id}` | `knowledge:read` | lectura |
+| `find_subscriber` | `GET /subscribers?q=` | `subscribers:read` | lectura |
+| `get_subscriber` | `GET /subscribers/{id}` | `subscribers:read` | lectura |
+| `diagnose_subscriber` | `GET /subscribers/{id}/diagnosis` | `subscribers:read` | lectura |
+| `onu_read` | `POST /subscribers/{id}/onu/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
+| `onu_diagnose` | `POST /subscribers/{id}/onu/diagnose` + `GET /tasks/{id}` | `devices:read` | lectura |
+| `get_task` | `GET /tasks/{id}` | `devices:read` | lectura |
+| `list_onus` | `GET /network/onus` | `network:read` | lectura |
+| `list_olts` · `get_olt` | `GET /network/olts` · `/network/olts/{id}` | `network:read` | lectura |
+| `olt_read` | `POST /network/olts/{id}/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
+| `list_routers` | `GET /network/routers` | `network:read` | lectura |
+| `router_read` | `POST /network/routers/{id}/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
+| `network_alerts` | `GET /network/alerts` | `network:read` | lectura |
+| `device_metrics` | `GET /network/devices/{kind}/{id}/metrics/catalog` · `/series` | `network:read` | lectura |
+| `platform_logs` | `GET /logs/events` | `network:read` | lectura |
+| `list_reports` · `run_report` | `GET /reports` · `/reports/{key}` | `reports:read` | lectura |
+| `list_internet_profiles` | `GET /internet-profiles` | `profiles:read` | lectura |
+| `list_plans` | `GET /plans` | `plans:read` | lectura |
+| `list_invoices` | `GET /invoices` | `invoices:read` | lectura |
+| `find_work_orders` · `get_work_order` | `GET /work-orders` · `/work-orders/{id}` | `work-orders:read` | lectura |
+| `find_technician` | `GET /employees?q=` | `employees:read` | lectura |
+| `network_snapshot` | `GET /operations/snapshot` | `operations:read` | lectura |
+| `reboot_onu` | `POST /subscribers/{id}/onu/actions` (`onu.reboot`) | `devices:operate` | escritura |
+| `set_onu_catv` | `POST /subscribers/{id}/onu/actions` (`onu.catv_update`) | `devices:operate` | escritura |
+| `change_subscriber_wifi` | `onu.wifi_read` + `POST /subscribers/{id}/onu/actions` (`onu.wifi_ssid_update`) | `devices:read` + `devices:operate` | escritura |
+| `change_wifi_radio` | `onu.wifi_read` + `POST /subscribers/{id}/onu/actions` (`onu.wifi_radio_update`) | `devices:read` + `devices:operate` | escritura |
+| `sync_onu` | `POST /subscribers/{id}/onu/sync` | `devices:operate` | escritura |
+| `change_subscriber_plan` | `POST /subscribers/{id}/plan` | `subscribers:write` | escritura |
+| `change_subscriber_bandwidth` | `POST /subscribers/{id}/bandwidth` | `subscribers:write` | escritura |
+| `disconnect_subscriber` | `POST /subscribers/{id}/disconnect` (+ `POST /work-orders`) | `subscribers:write` (+ `work-orders:write`) | escritura |
+| `reconnect_subscriber` | `POST /subscribers/{id}/reconnect` | `subscribers:write` | escritura |
+| `create_work_order` | `POST /work-orders` | `work-orders:write` | escritura |
+| `assign_work_order` | `POST /work-orders/{id}/assign` | `work-orders:assign` | escritura |
+
+Todas las herramientas que reciben un abonado aceptan `subscriber_id` o
+`subscriber_query`; con `subscriber_query` se exige **exactamente un** abonado
+(si no, `ambiguous_subscriber` con los candidatos y no se hace ninguna
+escritura).
+
+Las herramientas de equipo (`onu_read`, `onu_diagnose`, `olt_read`,
+`router_read` y las escrituras de ONU) despachan una tarea y **esperan hasta
+40 s** (consulta cada 2 s) a su resultado, que devuelven con la forma de
+`GET /tasks/{id}`. Si no terminó, responden `{"status":"pending","task_run_id":N}`
+y se la sigue con `get_task`. `change_subscriber_wifi` y `change_wifi_radio`
+primero leen el WiFi (`onu.wifi_read`) y escriben con el `task_run_id` de esa
+lectura (`based_on_task_run_id`); si la lectura falla o no termina, no escriben.
+
+Las escrituras mandan `Idempotency-Key` (reintentar con la misma clave no repite
+la acción) y `X-CloudISP-Requested-By` (quién lo pidió; el admin lo registra y lo
+antepone a la auditoría). Cuando `requested_by` tiene acentos se envía sin ellos.
+
+> `assign_installation` se reemplazó por `assign_work_order` (acepta cualquier
+> tipo de orden), y el parámetro `query` de las herramientas por abonado pasó a
+> `subscriber_query`.
 
 ## Skills
 
 | Skill | Para qué |
 | --- | --- |
-| `cloudisp-operator` | Reglas base: buscar antes de actuar, ambigüedad, confirmación, privacidad. |
-| `cloudisp-consultas` | Consultas de abonados, perfiles, órdenes y técnicos. |
-| `cloudisp-network-status` | Abonados online y throughput WAN. |
-| `cloudisp-bandwidth` | Cambio de perfil de un abonado. |
-| `cloudisp-disconnect` | Desconexión con orden de trabajo opcional. |
-| `cloudisp-assign-installation` | Asignar una instalación a un técnico. |
+| `cloudisp-operator` | Reglas núcleo: buscar antes de actuar, ambigüedad, confirmación, subagentes, privacidad. |
+| `cloudisp-diagnostico` | Árbol de diagnóstico "abonado sin internet" (deuda, PPPoE, ONU, PON, router, logs). |
+| `cloudisp-consultas` | Consultas de abonados, perfiles, planes, facturas, órdenes, técnicos, ONUs, OLTs y reportes. |
+| `cloudisp-network-status` | Estado de red, alertas, equipos, métricas y logs. |
+| `cloudisp-bandwidth` | Cambio de plan o de perfil de un abonado. |
+| `cloudisp-disconnect` | Corte y reconexión, con orden de trabajo opcional. |
+| `cloudisp-ordenes-trabajo` | Crear y asignar órdenes de trabajo. |
 
 Las skills responden en español.
 
@@ -133,11 +204,18 @@ Las skills responden en español.
 
 - **Solo lectura por defecto.** Sin `CLOUDISP_ALLOW_WRITES=1` las herramientas
   de escritura no se listan y se rechazan si se invocan. Además la clave tiene
-  que tener los scopes de escritura.
-- **Datos personales.** El servidor elimina `document`, `phone` y `email` de
-  lo que ve el agente. Ojo: la API sí devuelve esos campos a quien tenga la
-  clave, así que tratala como un secreto. La dirección y la localidad se
-  conservan para distinguir homónimos.
+  que tener los scopes de escritura, y el admin aplica por plataforma su
+  política (`read`/`technician`) y el tope diario: la frontera real de las
+  escrituras es el servidor, no este proceso.
+- **Confirmación.** Cada escritura exige `requested_by` e `idempotency_key`, y
+  su descripción le indica al agente confirmar con el operador antes de
+  llamarla. Los agentes que lo soportan (Hermes con `trust: untrusted`) piden
+  además aprobación humana por cada herramienta sin `readOnlyHint`.
+- **Datos personales y secretos.** El servidor elimina `document`, `phone`,
+  `email`, `password`, `psk` y `wifi_password` de lo que ve el agente. Ojo: la
+  API sí devuelve algunos de esos campos a quien tenga la clave, así que
+  tratala como un secreto. La dirección y la localidad se conservan para
+  distinguir homónimos.
 - **Transporte.** Solo `https://` (salvo `localhost`); cada pedido tiene un
   límite de 30 s.
 - **Sin logs.** stdout lleva solo JSON-RPC; la clave y el header
