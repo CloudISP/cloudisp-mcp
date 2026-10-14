@@ -229,6 +229,28 @@ test('find_subscriber calls GET /subscribers?q=', async () => {
     assert.equal(calls[0].query.get('q'), 'Perez');
 });
 
+test('find_subscriber: #N looks up that id only; a missing #N is no match; bare digits are a text search', async () => {
+    const found = await run('find_subscriber', { query: '#42' }, {
+        'GET /subscribers/42': jsonResponse({ success: true, data: { id: 42 } }),
+    });
+    assert.deepEqual(sig(found.calls), ['GET /subscribers/42']);
+    assert.equal(found.result.meta.total, 1);
+
+    const missing = await run('find_subscriber', { query: '#1234' }, {
+        'GET /subscribers/1234': errorResponse(404, { code: 'not_found', message: 'Not found.' }),
+        'GET /subscribers': ONE_SUBSCRIBER,
+    });
+    assert.deepEqual(sig(missing.calls), ['GET /subscribers/1234']);
+    assert.equal(missing.result.meta.total, 0);
+
+    const bare = await run('find_subscriber', { query: '123456' }, {
+        'GET /subscribers/123456': jsonResponse({ success: true, data: { id: 123456 } }),
+        'GET /subscribers': ONE_SUBSCRIBER,
+    });
+    assert.deepEqual(sig(bare.calls), ['GET /subscribers']);
+    assert.equal(bare.calls[0].query.get('q'), '123456');
+});
+
 test('get_subscriber and diagnose_subscriber GET the subscriber, resolving a query to exactly one first', async () => {
     const routes = {
         'GET /subscribers': ONE_SUBSCRIBER,

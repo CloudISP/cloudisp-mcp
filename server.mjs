@@ -395,7 +395,7 @@ async function resolveSubscriberId(fetchImpl, args, { optional = false } = {}) {
  * @return {Promise<object>} The single serialized subscriber row.
  */
 async function findSingleSubscriber(fetchImpl, query) {
-    const response = await apiRequest(fetchImpl, 'GET', '/subscribers', { query: { q: query } });
+    const response = await searchSubscribers(fetchImpl, query);
 
     if (!response.ok) {
         fail(apiFailurePayload(response));
@@ -408,6 +408,35 @@ async function findSingleSubscriber(fetchImpl, query) {
     }
 
     return rows[0];
+}
+
+/** `#1234` is a subscriber number (id). Bare digits are always a document/name text search. */
+const SUBSCRIBER_NUMBER_PATTERN = /^#\s*(\d{1,12})$/;
+
+/**
+ * Search subscribers: `#1234` looks up that subscriber number only (missing = no match, never a
+ * document fallback); anything else is the API's name/document text search.
+ *
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {string} query Name, document fragment or `#` subscriber number.
+ * @return {Promise<{ ok: boolean, status: number, body: unknown }>} List-shaped response.
+ */
+async function searchSubscribers(fetchImpl, query) {
+    const match = SUBSCRIBER_NUMBER_PATTERN.exec(query.trim());
+
+    if (match === null) {
+        return apiRequest(fetchImpl, 'GET', '/subscribers', { query: { q: query.trim() } });
+    }
+
+    const byId = await apiRequest(fetchImpl, 'GET', `/subscribers/${Number(match[1])}`);
+    if (byId.ok && byId.body?.data) {
+        return { ok: true, status: 200, body: { success: true, data: [byId.body.data], meta: { total: 1, page: 1, per_page: 1, pages: 1 } } };
+    }
+    if (byId.status === 404) {
+        return { ok: true, status: 200, body: { success: true, data: [], meta: { total: 0, page: 1, per_page: 0, pages: 0 } } };
+    }
+
+    return byId;
 }
 
 /**
@@ -470,7 +499,7 @@ async function findPendingWorkOrder(fetchImpl, subscriberId, type) {
  */
 async function findSubscriber(args, fetchImpl) {
     const query = requireQuery(args.query);
-    const response = await apiRequest(fetchImpl, 'GET', '/subscribers', { query: { q: query } });
+    const response = await searchSubscribers(fetchImpl, query);
 
     return isFailure(response) ? apiFailurePayload(response) : response.body;
 }
@@ -1497,9 +1526,9 @@ const TOOLS = [
     readTool(
         'find_subscriber',
         'Buscar abonado',
-        'Find subscribers by name or document fragment (at least 2 characters). Read the meta.total field: a write '
-        + 'tool that needs a single subscriber refuses to act when it is not 1.',
-        { query: { type: 'string', description: 'Name (first/last) or document fragment, at least 2 characters.' } },
+        'Find subscribers by subscriber number written as #1234 (exact id), or by name or document fragment. '
+        + 'Read the meta.total field: a write tool that needs a single subscriber refuses to act when it is not 1.',
+        { query: { type: 'string', description: 'Subscriber number as #1234, name (first/last) or document fragment.' } },
         findSubscriber,
         ['query'],
     ),
