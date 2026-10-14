@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { PassThrough } from 'node:stream';
 
-import { awaitTask, dispatch, REDACTED_KEYS, startServer } from './server.mjs';
+import { awaitTask, dispatch, listTools, REDACTED_KEYS, startServer } from './server.mjs';
 
 const SERVER_PATH = fileURLToPath(new URL('./server.mjs', import.meta.url));
 const API_BASE = 'https://admin.cloudisp.test';
@@ -217,7 +217,7 @@ test('search_knowledge searches by text or fetches one article, and rejects anyt
     for (const args of [{}, { query: 'a' }, { query: 'wifi', article_id: 5 }, { query: 'x'.repeat(101) }]) {
         const refused = await run('search_knowledge', args, routes);
 
-        assert.equal(refused.result.error, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
         assert.equal(refused.calls.length, 0);
     }
 });
@@ -245,11 +245,11 @@ test('get_subscriber and diagnose_subscriber GET the subscriber, resolving a que
     const ambiguous = await run('diagnose_subscriber', { subscriber_query: 'Perez' }, {
         'GET /subscribers': jsonResponse({ success: true, data: [{ id: 1 }, { id: 2 }], meta: { total: 2 } }),
     });
-    assert.equal(ambiguous.result.error, 'ambiguous_subscriber');
+    assert.equal(ambiguous.result.outcome, 'ambiguous_subscriber');
     assert.equal(ambiguous.calls.length, 1);
 
     const both = await run('get_subscriber', { subscriber_id: 42, subscriber_query: 'Perez' }, routes);
-    assert.equal(both.result.error, 'validation_failed');
+    assert.equal(both.result.outcome, 'validation_failed');
     assert.equal(both.calls.length, 0);
 });
 
@@ -278,7 +278,7 @@ test('onu_read refuses an operation outside the closed list without any HTTP cal
     for (const operation of ['onu.reboot', 'onu.wifi_ssid_update', 'onu.lan_dns_read', '', undefined]) {
         const { result, calls } = await run('onu_read', { subscriber_id: 42, operation });
 
-        assert.equal(result.error, 'validation_failed', String(operation));
+        assert.equal(result.outcome, 'validation_failed', String(operation));
         assert.equal(calls.length, 0);
     }
 });
@@ -288,7 +288,7 @@ test('onu_read answers the API failure verbatim when the dispatch is refused', a
         'POST /subscribers/42/onu/reads': errorResponse(422, { code: 'onu_not_linked', message: 'No ONU.' }),
     });
 
-    assert.equal(result.error.code, 'onu_not_linked');
+    assert.equal(result.outcome, 'onu_not_linked');
     assert.equal(calls.length, 1);
 });
 
@@ -360,7 +360,7 @@ test('olt_read and router_read post to their reads endpoint and await the task',
     for (const [name, args] of [['olt_read', { olt_id: 6, operation: 'routeros.health_check' }], ['router_read', { router_id: 3, operation: 'olt.poll' }]]) {
         const refused = await run(name, args);
 
-        assert.equal(refused.result.error, 'validation_failed', name);
+        assert.equal(refused.result.outcome, 'validation_failed', name);
         assert.equal(refused.calls.length, 0);
     }
 });
@@ -384,7 +384,7 @@ test('device_metrics asks for the catalogue, or for the series with metric_id[]'
     assert.equal(series.calls[0].query.get('window'), '24h');
     assert.equal(series.calls[0].query.get('resolution'), '5m');
 
-    assert.equal((await run('device_metrics', { kind: 'onu', device_id: 1 }, routes)).result.error, 'validation_failed');
+    assert.equal((await run('device_metrics', { kind: 'onu', device_id: 1 }, routes)).result.outcome, 'validation_failed');
 });
 
 test('platform_logs sends the platform, the range, the filters and severity[]', async () => {
@@ -403,7 +403,7 @@ test('platform_logs sends the platform, the range, the filters and severity[]', 
     assert.equal(calls[0].query.get('q'), 'ana.perez');
     assert.equal(calls[0].query.get('limit'), '200');
 
-    assert.equal((await run('platform_logs', {})).result.error, 'validation_failed');
+    assert.equal((await run('platform_logs', {})).result.outcome, 'validation_failed');
 });
 
 test('list_reports and run_report map onto /reports and /reports/{key}', async () => {
@@ -417,7 +417,7 @@ test('list_reports and run_report map onto /reports and /reports/{key}', async (
     assert.equal(report.calls[0].query.get('platform_id'), '4');
     assert.equal(report.calls[0].query.get('olt_id'), '6');
 
-    assert.equal((await run('run_report', { key: '../etc' }, routes)).result.error, 'validation_failed');
+    assert.equal((await run('run_report', { key: '../etc' }, routes)).result.outcome, 'validation_failed');
 });
 
 test('list_plans, list_invoices, find_work_orders, get_work_order and find_technician map onto their endpoints', async () => {
@@ -452,8 +452,8 @@ test('change_subscriber_bandwidth with an ambiguous subscriber_query performs no
         { 'GET /subscribers': jsonResponse({ success: true, data: [{ id: 1 }, { id: 2 }], meta: { total: 2 } }) },
     );
 
-    assert.equal(result.error, 'ambiguous_subscriber');
-    assert.equal(result.candidates.length, 2);
+    assert.equal(result.outcome, 'ambiguous_subscriber');
+    assert.equal(result.details.length, 2);
     assert.deepEqual(sig(calls), ['GET /subscribers']);
     assert.equal(calls[0].query.get('q'), 'Perez');
     assert.equal(calls[0].headers['X-CloudISP-Requested-By'], 'Marcos Rivadeo', 'the lookup is attributed too');
@@ -482,7 +482,7 @@ test('change_subscriber_bandwidth rejects two bandwidth targets without any HTTP
         ...WRITE_ARGS, subscriber_id: 7, profile_id: 5, download_max_limit: 100,
     });
 
-    assert.equal(result.error, 'validation_failed');
+    assert.equal(result.outcome, 'validation_failed');
     assert.equal(calls.length, 0);
 });
 
@@ -506,7 +506,7 @@ test('reboot_onu keeps the failed projection and the replayed flag of a replay',
         'GET /tasks/9': jsonResponse(taskProjection(9, 'failed', {}, 'onu_offline')),
     });
 
-    assert.equal(result.success, false);
+    assert.equal(result.outcome, 'task_failed');
     assert.equal(result.error_code, 'onu_offline');
     assert.equal(result.replayed, true);
 });
@@ -516,7 +516,7 @@ test('reboot_onu answers a policy refusal verbatim and never polls', async () =>
         'POST /subscribers/42/onu/actions': errorResponse(403, { code: 'platform_policy_denied', message: 'Read only.' }),
     });
 
-    assert.equal(result.error.code, 'platform_policy_denied');
+    assert.equal(result.outcome, 'platform_policy_denied');
     assert.equal(calls.length, 1);
 });
 
@@ -529,7 +529,7 @@ test('set_onu_catv posts onu.catv_update with the target state', async () => {
     assert.deepEqual(calls[0].body, { operation: 'onu.catv_update', parameters: { catv_state: 'disable' } });
 
     const refused = await run('set_onu_catv', { ...WRITE_ARGS, subscriber_id: 42, catv_state: 'on' });
-    assert.equal(refused.result.error, 'validation_failed');
+    assert.equal(refused.result.outcome, 'validation_failed');
     assert.equal(refused.calls.length, 0);
 });
 
@@ -579,13 +579,13 @@ test('change_subscriber_wifi never writes when the read failed, did not finish, 
     const pending = await run('change_subscriber_wifi', base, {
         ...reads, 'GET /tasks/10': jsonResponse(taskProjection(10, 'running')),
     });
-    assert.equal(pending.result.error, 'wifi_read_pending');
+    assert.equal(pending.result.outcome, 'wifi_read_pending');
     assert.equal(pending.calls.some((call) => call.path.endsWith('/onu/actions')), false);
 
     const missing = await run('change_subscriber_wifi', { ...base, ssid_index: 3 }, {
         ...reads, 'GET /tasks/10': jsonResponse(WIFI_READ),
     });
-    assert.equal(missing.result.error, 'validation_failed');
+    assert.equal(missing.result.outcome, 'validation_failed');
     assert.equal(missing.calls.some((call) => call.path.endsWith('/onu/actions')), false);
 });
 
@@ -611,7 +611,7 @@ test('change_wifi_radio reads first and writes the radio with the read task_run_
     assert.equal(result.task_run_id, 11);
 
     const refused = await run('change_wifi_radio', { ...WRITE_ARGS, subscriber_id: 42, radio_index: 3, channel: 'auto' });
-    assert.equal(refused.result.error, 'validation_failed');
+    assert.equal(refused.result.outcome, 'validation_failed');
     assert.equal(refused.calls.length, 0);
 });
 
@@ -636,7 +636,7 @@ test('change_subscriber_plan posts plan_id to /plan', async () => {
     assert.deepEqual(calls[0].body, { plan_id: 8 });
     assert.equal(calls[0].headers['Idempotency-Key'], 'op-1');
 
-    assert.equal((await run('change_subscriber_plan', { ...WRITE_ARGS, subscriber_id: 42 })).result.error, 'validation_failed');
+    assert.equal((await run('change_subscriber_plan', { ...WRITE_ARGS, subscriber_id: 42 })).result.outcome, 'validation_failed');
 });
 
 test('disconnect_subscriber sends the scope and opens the linked work order with the same idempotency token', async () => {
@@ -669,7 +669,7 @@ test('disconnect_subscriber defaults the scope to internet and rejects an unknow
     assert.deepEqual(calls[0].body, { scope: 'internet' });
 
     const refused = await run('disconnect_subscriber', { ...WRITE_ARGS, subscriber_id: 42, scope: 'wifi' });
-    assert.equal(refused.result.error, 'validation_failed');
+    assert.equal(refused.result.outcome, 'validation_failed');
     assert.equal(refused.calls.length, 0);
 });
 
@@ -699,8 +699,8 @@ test('reconnect_subscriber posts the scope to /reconnect and returns an illegal_
     const refused = await run('reconnect_subscriber', { ...WRITE_ARGS, subscriber_id: 42 }, {
         'POST /subscribers/42/reconnect': errorResponse(409, { code: 'illegal_transition', message: 'Debt cutoff.', details: { availability: { open_cutoff: true } } }),
     });
-    assert.equal(refused.result.error.code, 'illegal_transition');
-    assert.equal(refused.result.error.details.availability.open_cutoff, true);
+    assert.equal(refused.result.outcome, 'illegal_transition');
+    assert.equal(refused.result.details.availability.open_cutoff, true);
 });
 
 test('create_work_order posts the order with the idempotency key as external_ref', async () => {
@@ -719,7 +719,7 @@ test('create_work_order posts the order with the idempotency key as external_ref
     for (const args of [{ title: 'x' }, { type: 'other' }, { type: 'other', title: 'x', idempotency_key: 'k'.repeat(101) }]) {
         const refused = await run('create_work_order', { ...WRITE_ARGS, subscriber_id: 42, ...args });
 
-        assert.equal(refused.result.error, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
         assert.equal(refused.calls.length, 0);
     }
 });
@@ -750,8 +750,8 @@ test('assign_work_order returns the candidates and does not assign when a lookup
         { ...WRITE_ARGS, work_order_id: 7, technician_query: 'Ruiz' },
         { 'GET /employees': jsonResponse({ success: true, data: [{ id: 9 }, { id: 10 }], meta: { total: 2 } }) },
     );
-    assert.equal(technicians.result.error, 'ambiguous_technician');
-    assert.equal(technicians.result.candidates.length, 2);
+    assert.equal(technicians.result.outcome, 'ambiguous_technician');
+    assert.equal(technicians.result.details.length, 2);
     assert.equal(technicians.calls.filter((call) => call.method === 'POST').length, 0);
 
     const orders = await run(
@@ -759,11 +759,11 @@ test('assign_work_order returns the candidates and does not assign when a lookup
         { ...WRITE_ARGS, subscriber_id: 42, type: 'installation', employee_id: 9 },
         { 'GET /work-orders': jsonResponse({ success: true, data: [{ id: 7 }, { id: 8 }], meta: { total: 2 } }) },
     );
-    assert.equal(orders.result.error, 'ambiguous_work_order');
+    assert.equal(orders.result.outcome, 'ambiguous_work_order');
     assert.equal(orders.calls.filter((call) => call.method === 'POST').length, 0);
 
     const untyped = await run('assign_work_order', { ...WRITE_ARGS, subscriber_id: 42, employee_id: 9 });
-    assert.equal(untyped.result.error, 'validation_failed');
+    assert.equal(untyped.result.outcome, 'validation_failed');
     assert.equal(untyped.calls.length, 0);
 });
 
@@ -780,7 +780,7 @@ test('every write tool refuses a missing requested_by without any HTTP call', as
     for (const name of WRITE_TOOL_NAMES) {
         const { result, calls } = await run(name, { idempotency_key: 'op-1', subscriber_id: 42 });
 
-        assert.equal(result.error, 'validation_failed', name);
+        assert.equal(result.outcome, 'validation_failed', name);
         assert.match(result.message, /requested_by/, name);
         assert.equal(calls.length, 0, name);
     }
@@ -790,7 +790,7 @@ test('every write tool refuses a missing idempotency_key without any HTTP call',
     for (const name of WRITE_TOOL_NAMES) {
         const { result, calls } = await run(name, { requested_by: 'Ana', subscriber_id: 42 });
 
-        assert.equal(result.error, 'validation_failed', name);
+        assert.equal(result.outcome, 'validation_failed', name);
         assert.match(result.message, /idempotency_key/, name);
         assert.equal(calls.length, 0, name);
     }
@@ -805,7 +805,7 @@ test('requested_by reaches the API as an ASCII header and is refused beyond 120 
     for (const requested_by of ['x'.repeat(121), '   ', '🚀']) {
         const refused = await run('change_subscriber_plan', { ...WRITE_ARGS, requested_by, subscriber_id: 42, plan_id: 8 }, routes);
 
-        assert.equal(refused.result.error, 'validation_failed', requested_by);
+        assert.equal(refused.result.outcome, 'validation_failed', requested_by);
         assert.equal(refused.calls.length, 0);
     }
 });
@@ -864,7 +864,7 @@ test('dispatch refuses every write tool when CLOUDISP_ALLOW_WRITES is unset, wit
             { CLOUDISP_API_BASE: API_BASE, CLOUDISP_API_KEY: API_KEY },
         );
 
-        assert.equal(result.error, 'writes_disabled', `${name} must be refused`);
+        assert.equal(result.outcome, 'writes_disabled', `${name} must be refused`);
         assert.match(result.message, /CLOUDISP_ALLOW_WRITES=1/);
     }
 
@@ -1003,7 +1003,7 @@ test('redaction strips password, psk and wifi_password (nested) along with docum
     assert.doesNotMatch(text, /S3cr3t/);
 });
 
-test('tools/call flags a failed task as an error but not a task that is still running', async () => {
+test('tools/call returns a failed task as an outcome, not an error', async () => {
     const input = new PassThrough();
     const output = new PassThrough();
     const written = [];
@@ -1028,7 +1028,101 @@ test('tools/call flags a failed task as an error but not a task that is still ru
     const messages = decodeMessages(Buffer.from(written.join(''), 'utf8'));
 
     assert.equal(messages.find((message) => message.id === 1).result.isError, false);
-    assert.equal(messages.find((message) => message.id === 2).result.isError, true);
+    assert.equal(messages.find((message) => message.id === 2).result.isError, false);
+});
+
+test('expected refusals are outcomes: ok:false, no top-level error, no isError', async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const written = [];
+
+    output.on('data', (chunk) => written.push(chunk.toString('utf8')));
+    startServer({
+        input,
+        output,
+        env: { CLOUDISP_API_BASE: API_BASE, CLOUDISP_API_KEY: API_KEY, CLOUDISP_ALLOW_WRITES: '1' },
+        fetchImpl: mockApi({
+            'GET /tasks/7': errorResponse(404, { code: 'task_not_found', message: 'No task.' }),
+            'GET /network/alerts': errorResponse(503, { code: 'source_unavailable', message: 'Loki down.' }),
+        }).fetchImpl,
+    });
+
+    const calls = [
+        ['get_task', { task_run_id: 7 }],
+        ['network_alerts', {}],
+        ['find_subscriber', { query: '' }],
+    ];
+
+    calls.forEach(([name, args], index) => {
+        input.write(encodeLine({ jsonrpc: '2.0', id: index + 1, method: 'tools/call', params: { name, arguments: args } }));
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const messages = decodeMessages(Buffer.from(written.join(''), 'utf8'));
+    const bodies = [1, 2, 3].map((id) => {
+        const { result } = messages.find((message) => message.id === id);
+
+        assert.equal(result.isError, false);
+
+        return JSON.parse(result.content[0].text);
+    });
+
+    for (const body of bodies) {
+        assert.equal(Object.hasOwn(body, 'error'), false);
+        assert.equal(body.ok, false);
+        assert.equal(typeof body.hint, 'string');
+    }
+
+    assert.deepEqual(bodies.map((body) => body.outcome), ['task_not_found', 'source_unavailable', 'validation_failed']);
+    assert.equal(bodies[0].message, 'No task.');
+});
+
+test('transport-level failures stay tool errors: 401, 500, non-JSON', async () => {
+    for (const response of [
+        errorResponse(401, { code: 'unauthorized', message: 'Bad key.' }),
+        errorResponse(500, { code: 'internal_error', message: 'Boom.' }),
+        errorResponse(503, { code: 'dispatch_failed', message: 'Netwatcher down.' }),
+        { ok: false, status: 502, json: async () => { throw new Error('html'); } },
+    ]) {
+        const { result } = await run('get_task', { task_run_id: 1 }, { 'GET /tasks/1': response });
+
+        assert.equal(typeof result.error, 'object', String(response.status));
+        assert.equal(result.outcome, undefined);
+    }
+});
+
+test('a failed task is an outcome with its error_code', async () => {
+    const { result } = await run('get_task', { task_run_id: 3 }, { 'GET /tasks/3': jsonResponse(taskProjection(3, 'failed', {}, 'onu_offline')) });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, 'task_failed');
+    assert.equal(result.error_code, 'onu_offline');
+    assert.equal(Object.hasOwn(result, 'error'), false);
+});
+
+test('router_read accepts only the three executable operations and validates the test_command', async () => {
+    const tool = listTools(WRITES_ON).find((candidate) => candidate.name === 'router_read');
+
+    assert.deepEqual(tool.inputSchema.properties.operation.enum, ['routeros.health_check', 'routeros.test_command', 'routeros.interface_monitor_traffic']);
+
+    for (const args of [
+        { router_id: 3, operation: 'routeros.resource_read' },
+        { router_id: 3, operation: 'routeros.test_command' },
+        { router_id: 3, operation: 'routeros.test_command', command: '/system/reboot' },
+    ]) {
+        const refused = await run('router_read', args);
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.calls.length, 0);
+    }
+
+    const ok = await run('router_read', { router_id: 3, operation: 'routeros.test_command', command: '/interface/print' }, {
+        'POST /network/routers/3/reads': accepted(30),
+        'GET /tasks/30': jsonResponse(taskProjection(30, 'succeeded')),
+    });
+
+    assert.deepEqual(ok.calls[0].body, { operation: 'routeros.test_command', parameters: { command: '/interface/print' } });
 });
 
 // ─── stdio framing ───────────────────────────────────────────────────────────

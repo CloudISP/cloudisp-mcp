@@ -81,6 +81,9 @@ function readConfig() {
     return { base, key, configured: base !== '' && key !== '', valid };
 }
 
+/** Symbol key (invisible to JSON) that carries the HTTP status of a failed API response to `classifyOutcome`. */
+const HTTP_STATUS = Symbol('httpStatus');
+
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
 /**
@@ -123,14 +126,16 @@ function invalid(message) {
  * @return {object}
  */
 function apiFailurePayload(response) {
-    if (response.body !== null && response.body !== undefined) {
-        return response.body;
-    }
+    const payload = isPlainObject(response.body)
+        ? response.body
+        : {
+            success: false,
+            error: { code: 'http_error', message: `The public API answered HTTP ${response.status} with no JSON body.` },
+        };
 
-    return {
-        success: false,
-        error: { code: 'http_error', message: `The public API answered HTTP ${response.status} with no JSON body.` },
-    };
+    payload[HTTP_STATUS] = response.status;
+
+    return payload;
 }
 
 // ─── HTTP ────────────────────────────────────────────────────────────────────
@@ -757,11 +762,11 @@ const OLT_READ_OPERATIONS = [
     'olt.health_check', 'olt.system_info_read', 'olt.mac_table_read', 'olt.unprovisioned_onus_read', 'olt.poll',
 ];
 
-/** Router read operations the public API may enable (netwatcher routable ∩ admin allowlist). */
-const ROUTER_READ_OPERATIONS = [
-    'routeros.health_check', 'routeros.resource_read', 'routeros.interface_read', 'routeros.ppp_active_read',
-    'routeros.arp_read', 'routeros.dhcp_lease_read', 'routeros.interface_monitor_traffic',
-];
+/** Router read operations netwatcher's RouterOS worker actually executes. */
+const ROUTER_READ_OPERATIONS = ['routeros.health_check', 'routeros.test_command', 'routeros.interface_monitor_traffic'];
+
+/** The only `command` values `routeros.test_command` accepts (netwatcher PARAMETER_SCHEMA enum). */
+const ROUTER_TEST_COMMANDS = ['/system/identity/print', '/system/resource/print', '/interface/print', '/ip/address/print'];
 
 /** Device kinds that have metrics. */
 const DEVICE_KINDS = ['routeros', 'olt'];
@@ -973,8 +978,20 @@ async function listRouters(_args, fetchImpl) {
  */
 async function routerRead(args, fetchImpl, clock) {
     const operation = requireOperation(args, ROUTER_READ_OPERATIONS);
+    const routerId = requireId(args, 'router_id');
+    let parameters = isPlainObject(args.parameters) ? args.parameters : {};
 
-    return postRead(fetchImpl, clock, `/network/routers/${requireId(args, 'router_id')}/reads`, operation, args);
+    if (operation === 'routeros.test_command') {
+        const command = args.command ?? parameters.command;
+
+        if (!ROUTER_TEST_COMMANDS.includes(command)) {
+            fail(invalid(`command is required for routeros.test_command and must be one of: ${ROUTER_TEST_COMMANDS.join(', ')}.`));
+        }
+
+        parameters = { ...parameters, command };
+    }
+
+    return postRead(fetchImpl, clock, `/network/routers/${routerId}/reads`, operation, { parameters });
 }
 
 /**
@@ -1588,11 +1605,12 @@ const TOOLS = [
         'router_read',
         'Leer router',
         'Run a read-only operation on a MikroTik router through a device task and wait up to 40 s for the result (see onu_read for the result shape). '
-        + 'Operations: routeros.health_check, routeros.resource_read, routeros.interface_read, routeros.ppp_active_read, routeros.arp_read, '
-        + 'routeros.dhcp_lease_read, routeros.interface_monitor_traffic (parameters {interface}); the API refuses those it has not enabled.',
+        + 'Operations: routeros.health_check; routeros.test_command (requires command, one of /system/identity/print, /system/resource/print, /interface/print, /ip/address/print); '
+        + 'routeros.interface_monitor_traffic (parameters {interface}). Resource, interface, PPP, ARP and DHCP reads are not available: use list_routers, device_metrics or platform_logs instead.',
         {
             router_id: { type: 'integer', description: 'Router id from list_routers.' },
             operation: { type: 'string', enum: ROUTER_READ_OPERATIONS, description: 'Router read operation.' },
+            command: { type: 'string', enum: ROUTER_TEST_COMMANDS, description: 'Required for routeros.test_command.' },
             parameters: { type: 'object', description: 'Operation parameters, when the operation takes any.' },
         },
         routerRead,
@@ -1889,12 +1907,88 @@ const WRITE_TOOLS = TOOLS.filter((tool) => tool.write).map((tool) => tool.name);
  * @param {Record<string, string|undefined>} [env] Environment bag (defaults to `process.env`).
  * @return {Array<object>}
  */
-function listTools(env = process.env) {
+export function listTools(env = process.env) {
     const enabled = writesEnabled(env);
 
     return TOOLS
         .filter((tool) => enabled || !WRITE_TOOLS.includes(tool.name))
         .map(({ name, title, description, inputSchema, annotations }) => ({ name, title, description, inputSchema, annotations }));
+}
+
+// ─── Outcomes ────────────────────────────────────────────────────────────────
+
+/** Short Spanish instruction to the model per outcome; anything else gets {@link DEFAULT_HINT}. */
+const DEFAULT_HINT = 'Informalo al usuario; no reintentes.';
+const OUTCOME_HINTS = {
+    not_found: 'Dato no disponible: decilo así.',
+    task_not_found: 'Dato no disponible: decilo así.',
+    source_unavailable: 'Dato no disponible: decilo así.',
+    validation_failed: 'Argumentos inválidos: corregilos o preguntale al usuario; no repitas la misma llamada.',
+    wifi_read_pending: 'La lectura no terminó y no se escribió nada; consultá get_task más tarde.',
+    task_failed: 'La tarea falló en el equipo: informá el motivo y ofrecé la alternativa (reinicio u OT); no reintentes solo.',
+};
+
+/**
+ * Build the outcome shape: an expected answer, not a tool error (no top-level `error` key).
+ *
+ * @param {string} outcome Machine code.
+ * @param {unknown} message Human-readable reason.
+ * @param {unknown} [details] API details or candidates.
+ * @param {object} [extra] Extra fields (e.g. `error_code`).
+ * @return {object}
+ */
+function outcomeResult(outcome, message, details, extra = {}) {
+    const hint = OUTCOME_HINTS[outcome] ?? (outcome.startsWith('ambiguous_')
+        ? 'Mostrale los candidatos al usuario con clarify y que elija; no adivines.'
+        : DEFAULT_HINT);
+
+    return {
+        ok: false,
+        outcome,
+        ...extra,
+        message: typeof message === 'string' ? message : '',
+        ...(details === undefined || details === null ? {} : { details }),
+        hint,
+    };
+}
+
+/**
+ * Turn expected domain answers into outcomes so they do not count as tool errors.
+ *
+ * Outcomes: HTTP 4xx (except 401) and 503 `source_unavailable` carrying an API error code, the
+ * MCP's own refusals (validation, ambiguity, writes disabled, WiFi read pending) and failed device
+ * tasks. Transport failures, 401, other 5xx, non-JSON answers and unknown tools stay errors.
+ *
+ * @param {unknown} result Raw tool payload.
+ * @return {unknown} The payload, or its outcome form.
+ */
+function classifyOutcome(result) {
+    if (!isPlainObject(result)) {
+        return result;
+    }
+
+    const status = result[HTTP_STATUS];
+
+    if (isPlainObject(result.error)) {
+        const { code, message, details } = result.error;
+        const expected = typeof code === 'string' && code !== 'http_error' && code !== 'unauthorized' && status !== 401
+            && ((status >= 400 && status < 500) || (status === 503 && code === 'source_unavailable'));
+
+        return expected ? outcomeResult(code, message, details) : result;
+    }
+
+    if (typeof result.error === 'string') {
+        return result.error === 'unknown_tool' ? result : outcomeResult(result.error, result.message, result.candidates);
+    }
+
+    if (result.success === false && (result.status === 'failed' || result.status === 'canceled')) {
+        return outcomeResult('task_failed', result.error_message || result.message, undefined, {
+            error_code: result.error_code ?? null,
+            ...(result.replayed === undefined ? {} : { replayed: result.replayed }),
+        });
+    }
+
+    return result;
 }
 
 // ─── Dispatch ────────────────────────────────────────────────────────────────
@@ -1913,6 +2007,20 @@ function listTools(env = process.env) {
  * @return {Promise<object>} Tool result payload.
  */
 export async function dispatch(name, args, fetchImpl = globalThis.fetch, env = process.env, clock = REAL_CLOCK) {
+    return classifyOutcome(await dispatchRaw(name, args, fetchImpl, env, clock));
+}
+
+/**
+ * Run a tool and return its raw payload (API envelope, refusal or failure), before outcome classification.
+ *
+ * @param {string} name Tool name.
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {Record<string, string|undefined>} env Environment bag.
+ * @param {{ now: Function, sleep: Function }} clock Clock seams.
+ * @return {Promise<object>} Raw tool payload.
+ */
+async function dispatchRaw(name, args, fetchImpl, env, clock) {
     const tool = TOOLS.find((candidate) => candidate.name === name);
 
     if (!tool) {

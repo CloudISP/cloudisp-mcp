@@ -178,6 +178,27 @@ y se la sigue con `get_task`. `change_subscriber_wifi` y `change_wifi_radio`
 primero leen el WiFi (`onu.wifi_read`) y escriben con el `task_run_id` de esa
 lectura (`based_on_task_run_id`); si la lectura falla o no termina, no escriben.
 
+**Resultados.** Las respuestas esperadas del dominio no son errores de la
+herramienta: un 4xx con código de la API (`validation_failed`, `not_found`,
+`platform_policy_denied`, `actor_forbidden`, `daily_write_limit_reached`,
+`illegal_transition`, …), un 503 `source_unavailable`, los rechazos propios del
+MCP (`ambiguous_*`, validación, `writes_disabled`, `wifi_read_pending`) y una
+tarea de equipo fallida vuelven con `isError: false` y **sin** clave `error`
+de primer nivel (así no abren el breaker de Hermes):
+
+```json
+{"ok": false, "outcome": "<código>", "message": "<mensaje de la API>", "details": {}, "hint": "<instrucción corta para el modelo>"}
+```
+
+`details` (detalles de la API o `candidates`) solo aparece si existe; la tarea
+fallida es `{"ok": false, "outcome": "task_failed", "error_code": "...", "message": "..."}`.
+Siguen siendo errores (`isError: true`, clave `error`) los fallos de transporte,
+timeouts, 401, 5xx distintos de `source_unavailable` y respuestas no JSON.
+
+`router_read` solo ejecuta `routeros.health_check`, `routeros.test_command`
+(`command`: `/system/identity/print`, `/system/resource/print`, `/interface/print`
+o `/ip/address/print`) y `routeros.interface_monitor_traffic`.
+
 Las escrituras mandan `Idempotency-Key` (reintentar con la misma clave no repite
 la acción) y `X-CloudISP-Requested-By` (quién lo pidió; el admin lo registra y lo
 antepone a la auditoría). Cuando `requested_by` tiene acentos se envía sin ellos.

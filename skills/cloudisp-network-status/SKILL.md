@@ -30,7 +30,7 @@ Llamalo sin argumentos e informá solo lo que devuelve:
 - **OLTs** — `list_olts` y `get_olt` (resumen por PON: total, online, offline,
   peor RX en dBm); `olt_read` con `olt.health_check` para una lectura en vivo.
 - **Routers MikroTik** — `list_routers` (salud) y `router_read` con
-  `routeros.health_check`, `routeros.resource_read` o `routeros.ppp_active_read`.
+  `routeros.health_check`, `routeros.test_command` (`command`: `/system/identity/print`, `/system/resource/print`, `/interface/print` o `/ip/address/print`) o `routeros.interface_monitor_traffic`.
 - **Alertas** — `network_alerts`.
 - **Métricas** — `device_metrics` (`kind`: `routeros` u `olt`, `device_id`): sin
   `metric_ids` devuelve el catálogo; con `metric_ids`, las series.

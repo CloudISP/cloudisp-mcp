@@ -44,7 +44,7 @@ abiertas.
        reinicio (`reboot_onu`) y, si falla, la OT.
 5. **Si sigue sin resolverse:** `platform_logs` (syslog del router/OLT de la
    plataforma del abonado, últimas 2 h, filtrado por el usuario PPPoE con `q`) y
-   `router_read` con `routeros.ppp_active_read`.
+   `router_read` con `routeros.test_command` (`command` `/interface/print`) y `list_routers`.
 6. **Reinicio fallido:** ofrecé `create_work_order` con `type`
    `technical_visit` y la descripción: *"Esta ONU no pudo ser reiniciada
    remotamente, se recomienda una visita técnica. Se puede solicitar al abonado
