@@ -749,7 +749,7 @@ async function awaitDispatched(fetchImpl, clock, response) {
 /** ONU read operations `POST /subscribers/{id}/onu/reads` accepts. */
 const ONU_READ_OPERATIONS = [
     'olt.onu_details_read', 'olt.onu_health_check', 'onu.tr069_read', 'onu.wan_read',
-    'onu.wifi_read', 'onu.catv_read', 'onu.wifi_diagnose', 'onu.lan_dns_read',
+    'onu.wifi_read', 'onu.catv_read', 'onu.wifi_diagnose',
 ];
 
 /** OLT read operations the public API may enable (netwatcher routable ∩ admin allowlist). */
@@ -1508,7 +1508,7 @@ const TOOLS = [
         'Read the subscriber\'s ONU through a device task and wait up to 40 s for the result. It does not change the equipment. Returns the '
         + 'final task projection ({success, status, task_run_id, error_code, message, result}); when the task is still running it returns '
         + '{status: "pending", task_run_id}: follow it with get_task. Operations: olt.onu_details_read, olt.onu_health_check, onu.tr069_read '
-        + '(parameters {refresh: boolean}), onu.wan_read, onu.wifi_read, onu.catv_read, onu.wifi_diagnose, onu.lan_dns_read.',
+        + '(parameters {refresh: boolean}), onu.wan_read, onu.wifi_read, onu.catv_read, onu.wifi_diagnose.',
         {
             ...SUBSCRIBER_PROPERTIES,
             operation: { type: 'string', enum: ONU_READ_OPERATIONS, description: 'ONU read operation.' },

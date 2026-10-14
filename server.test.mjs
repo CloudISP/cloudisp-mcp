@@ -174,8 +174,19 @@ function taskProjection(id, status, result = {}, errorCode = null) {
  * @return {object}
  */
 function accepted(id, extra = {}) {
-    return jsonResponse({ request_id: `req-${id}`, task_run_id: id, status: 'pending', ...extra }, 202);
+    return jsonResponse({ success: true, data: { task_run_id: id, request_id: `req-${id}`, status: 'pending', ...extra } }, 202);
 }
+
+test('a device task accepted with the id at the top level (no data envelope) is awaited too', async () => {
+    const { result, calls } = await run('onu_read', { subscriber_id: 42, operation: 'onu.wan_read' }, {
+        'POST /subscribers/42/onu/reads': jsonResponse({ request_id: 'req-3', task_run_id: 3, status: 'pending', replayed: true }, 202),
+        'GET /tasks/3': jsonResponse(taskProjection(3, 'succeeded')),
+    });
+
+    assert.deepEqual(sig(calls), ['POST /subscribers/42/onu/reads', 'GET /tasks/3']);
+    assert.equal(result.task_run_id, 3);
+    assert.equal(result.replayed, true);
+});
 
 const ONE_SUBSCRIBER = jsonResponse({ success: true, data: [{ id: 42 }], meta: { total: 1 } });
 
@@ -264,7 +275,7 @@ test('onu_read posts the operation, polls the task and returns the final project
 });
 
 test('onu_read refuses an operation outside the closed list without any HTTP call', async () => {
-    for (const operation of ['onu.reboot', 'onu.wifi_ssid_update', '', undefined]) {
+    for (const operation of ['onu.reboot', 'onu.wifi_ssid_update', 'onu.lan_dns_read', '', undefined]) {
         const { result, calls } = await run('onu_read', { subscriber_id: 42, operation });
 
         assert.equal(result.error, 'validation_failed', String(operation));
