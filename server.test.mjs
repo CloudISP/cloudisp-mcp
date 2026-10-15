@@ -2281,3 +2281,37 @@ test('write_tools.json lists exactly the tools that are not read-only, each with
         assert.notEqual(label, '');
     }
 });
+
+test('no tool description, schema text or guide entry names a tenant: ids come from cloudisp_context', async () => {
+    const tools = await listedTools({ CLOUDISP_ALLOW_WRITES: '1' });
+    const texts = [
+        ...tools.map((tool) => JSON.stringify(tool)),
+        ...guideCatalog().map((tool) => JSON.stringify(tool.guide)),
+        renderGuide(guideCatalog()),
+    ];
+
+    for (const text of texts) {
+        assert.equal(/NVS|Pinares|Cerrillos|Merced|Viviendas|San Agust|InterService|Longarela|Frontera/i.test(text), false, text.slice(0, 80));
+    }
+
+    assert.match(tools.find((tool) => tool.name === 'list_onus').inputSchema.properties.platform_id.description, /cloudisp_context/);
+});
+
+test('the SOUL template: a denial is final for the turn, off-topic requests are refused, and no runtime brand is named', () => {
+    const soul = fs.readFileSync(new URL('./deploy/hermes-tenant/SOUL.md.tmpl', import.meta.url), 'utf8');
+
+    assert.match(soul, /Un "no" es definitivo para ese turno/);
+    assert.match(soul, /NUNCA reintentes esa escritura/);
+    assert.match(soul, /Sólo un mensaje nuevo y explícito del operador/);
+    assert.match(soul, /Sólo puedo ayudarte con la operación de CloudISP\. Escribí \/guia/);
+    assert.match(soul, /poemas, cuentos, código/);
+    assert.match(soul, /Soy el {BOT_NAME} de {TENANT_NAME}; estoy para ayudarte con la operación de tu red\. ¿En qué te ayudo\?/);
+    assert.equal(/hermes|nous|omh|opencode|deepseek|kimi/i.test(soul), false);
+    assert.equal(/requested_by/.test(soul), false);
+
+    const numbers = [...soul.matchAll(/^(\d+)\. /gm)].map((match) => Number(match[1]));
+
+    for (let index = 1; index < numbers.length; index += 1) {
+        assert.ok(numbers[index] === numbers[index - 1] + 1 || numbers[index] === 1, `rule numbering around ${numbers[index]}`);
+    }
+});

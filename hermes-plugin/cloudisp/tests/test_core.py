@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from conftest import Event
 
-from cloudisp import core, register
+from cloudisp import core, patches, register, strings
 
 PLUGIN_DIR = Path(core.__file__).parent
 
@@ -237,6 +237,53 @@ def test_a_subagent_may_still_read(env, session):
     assert core.pre_tool_call_gate("mcp__cloudisp__find_subscriber", {"query": "x"}, "child-1") is None
 
 
+def denial(choice, turn="turn-1", session="sess-1", key="plugin_rule:cloudisp-write-abc"):
+    core.on_approval_response(pattern_key=key, choice=choice, session_id=session, turn_id=turn, session_key="agent:main", surface="gateway")
+
+
+@pytest.mark.parametrize("choice", ["deny", "timeout", "cancelled", "notify_failed"])
+def test_after_a_denied_confirmation_the_same_turn_cannot_ask_again(env, session, choice):
+    first = core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1", turn_id="turn-1")
+
+    assert first["action"] == "approve"
+
+    denial(choice)
+
+    again = core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1", turn_id="turn-1")
+    other = core.pre_tool_call_gate("mcp__cloudisp__kick_pppoe", {"subscriber_id": 1}, "sess-1", turn_id="turn-1")
+
+    assert again == other == {"action": "block", "message": core.DENIED_RETRY_TEXT}
+    assert "No la reintentes" in core.DENIED_RETRY_TEXT
+
+
+def test_a_new_turn_a_new_session_and_the_reads_are_not_affected_by_a_denial(env, session):
+    denial("deny")
+
+    assert core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1", turn_id="turn-2")["action"] == "approve"
+    assert core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-2", turn_id="turn-1")["action"] == "approve"
+    assert core.pre_tool_call_gate("mcp__cloudisp__find_subscriber", {"query": "#1"}, "sess-1", turn_id="turn-1") is None
+
+
+@pytest.mark.parametrize("choice", ["once", "session", "always"])
+def test_a_granted_confirmation_does_not_block_the_turn(env, session, choice):
+    denial(choice)
+
+    assert core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1", turn_id="turn-1")["action"] == "approve"
+
+
+def test_the_denial_of_an_approval_that_is_not_ours_is_ignored(env, session):
+    denial("deny", key="plugin_rule:other-plugin-rule")
+    denial("deny", key="dangerous_command:rm")
+
+    assert core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1", turn_id="turn-1")["action"] == "approve"
+
+
+def test_without_a_turn_id_there_is_nothing_to_remember(env, session):
+    core.on_approval_response(pattern_key="plugin_rule:cloudisp-write-x", choice="deny", session_id="sess-1", turn_id="")
+
+    assert core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1")["action"] == "approve"
+
+
 def test_the_shipped_write_list_matches_the_catalogue():
     shipped = core.load_write_tools()
 
@@ -448,6 +495,133 @@ def test_the_chat_strings_hide_the_model_the_provider_and_the_tool_names():
     assert "{tool}" not in overrides["gateway.progress.tool_pending"]
 
 
+def test_no_override_names_the_brand_a_tool_or_a_command_the_plugin_blocks():
+    for key, text in strings.LOCALE_OVERRIDES.items():
+        assert not re.search(r"hermes|nous|deepseek|opencode|openrouter|mcp__|\{tool\}|\{model\}|\{provider\}|\{activity\}|\{url\}|/retry|/login|/model|/stop|/compress|/reset|/busy|/verbose", text, re.IGNORECASE), key
+        assert not re.search(r"[A-Za-z]{4,} (the|and|your|you) [a-z]+", text), f"{key} reads as English"
+
+
+def test_the_heartbeat_has_no_detail_and_the_clarify_card_no_skip_hint():
+    assert "{detail}" not in strings.LOCALE_OVERRIDES["gateway.progress.working_heartbeat"]
+    assert strings.LOCALE_OVERRIDES["gateway.clarify.skip_hint"] == ""
+
+
+def test_the_generic_heartbeat_phrases_are_spanish_and_fit_the_runtime_limits():
+    for surface in ("status", "generic"):
+        phrases = strings.STATUS_PHRASES[surface]
+
+        assert phrases and all(0 < len(phrase) <= 160 and "," not in phrase for phrase in phrases), surface
+
+
+def test_the_approval_buttons_are_all_spanish():
+    for key in ("action_once", "action_session", "action_always", "action_deny"):
+        assert re.search(r"Aprobar|Denegar", strings.LOCALE_OVERRIDES[f"gateway.exec_approval.{key}"])
+
+
+# ─── runtime patches ─────────────────────────────────────────────────────────
+
+RULE_COMMAND = "<mcp__cloudisp__reboot_onu> (plugin approval rule)"
+
+
+@pytest.mark.parametrize("description, expected", [
+    ("✍️ Confirmá: Reiniciar la ONU — Abonado: 2861", ("Reiniciar la ONU", "Abonado: 2861")),
+    ("✍️ Confirmá: Cerrar la sesión de conexión (PPPoE)", ("Cerrar la sesión de conexión (PPPoE)", "sin detalles")),
+    ("✍️ Confirmá: Cambiar el WiFi — Abonado: 7 · Nombre: Casa — Sur", ("Cambiar el WiFi", "Abonado: 7 · Nombre: Casa — Sur")),
+])
+def test_the_card_of_a_plugin_write_shows_the_label_and_the_detail(description, expected):
+    assert patches.approval_card(RULE_COMMAND, description) == expected
+
+
+@pytest.mark.parametrize("command, description", [
+    ("rm -rf /", "comando peligroso"),
+    ("<mcp__other__tool> (plugin approval rule)", "Algo distinto"),
+    (RULE_COMMAND, "otra descripción"),
+    (RULE_COMMAND, None),
+    (None, "✍️ Confirmá: Reiniciar la ONU"),
+])
+def test_any_other_approval_card_is_left_alone(command, description):
+    assert patches.approval_card(command, description) is None
+
+
+@pytest.fixture
+def runtime(monkeypatch):
+    """Stand-ins for the two runtime modules the patches touch."""
+    import sys
+    import types
+
+    clarify = types.ModuleType("tools.clarify_tool")
+    clarify.mark_recommended = lambda choices: [f"{choices[0]} (Recommended)", *choices[1:]]
+    tools = types.ModuleType("tools")
+    tools.clarify_tool = clarify
+    calls = []
+
+    class Adapter:
+        async def send_exec_approval(self, chat_id, command, session_key, description=None, metadata=None, allow_permanent=True, allow_session=True, smart_denied=False):
+            calls.append({"command": command, "description": description, "allow_permanent": allow_permanent, "allow_session": allow_session, "smart_denied": smart_denied})
+
+            return "sent"
+
+    class Telegram(Adapter):
+        pass
+
+    base = types.ModuleType("gateway.platforms.base")
+    base.BasePlatformAdapter = Adapter
+    for name, module in (("tools", tools), ("tools.clarify_tool", clarify), ("gateway", types.ModuleType("gateway")), ("gateway.platforms", types.ModuleType("gateway.platforms")), ("gateway.platforms.base", base)):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    return types.SimpleNamespace(clarify=clarify, adapter=Adapter, telegram=Telegram, calls=calls)
+
+
+def test_the_clarify_card_loses_the_recommended_marker(runtime):
+    assert runtime.clarify.mark_recommended(["✅ Confirmar", "❌ Cancelar"])[0].endswith("(Recommended)")
+
+    assert patches.apply()["clarify"] is True
+    assert runtime.clarify.mark_recommended(["✅ Confirmar", "❌ Cancelar"]) == ["✅ Confirmar", "❌ Cancelar"]
+
+
+def test_a_plugin_write_card_offers_only_approve_and_deny(runtime):
+    import asyncio
+
+    assert patches.apply()["exec_approval"] is True
+
+    result = asyncio.run(runtime.telegram().send_exec_approval(
+        chat_id="1", command=RULE_COMMAND, session_key="k", description="✍️ Confirmá: Reiniciar la ONU — Abonado: 2861", metadata=None,
+        allow_permanent=True, allow_session=True,
+    ))
+
+    assert result == "sent"
+    assert runtime.calls == [{"command": "Reiniciar la ONU", "description": "Abonado: 2861", "allow_permanent": False, "allow_session": False, "smart_denied": False}]
+
+
+def test_every_other_approval_keeps_its_card_and_its_buttons(runtime):
+    import asyncio
+
+    patches.apply()
+    asyncio.run(runtime.telegram().send_exec_approval("1", "rm -rf /tmp/x", "k", "comando peligroso"))
+
+    assert runtime.calls == [{"command": "rm -rf /tmp/x", "description": "comando peligroso", "allow_permanent": True, "allow_session": True, "smart_denied": False}]
+
+
+def test_the_patches_apply_once(runtime):
+    patches.apply()
+    first = (runtime.clarify.mark_recommended, runtime.adapter.send_exec_approval)
+    patches.apply()
+
+    assert (runtime.clarify.mark_recommended, runtime.adapter.send_exec_approval) == first
+
+
+def test_a_runtime_without_the_targets_only_logs(monkeypatch, caplog):
+    import sys
+
+    for name in ("tools", "tools.clarify_tool", "gateway", "gateway.platforms", "gateway.platforms.base"):
+        monkeypatch.setitem(sys.modules, name, None)
+
+    with caplog.at_level("WARNING", logger="cloudisp"):
+        assert patches.apply() == {"clarify": False, "exec_approval": False}
+
+    assert "runtime patch 'clarify' not applied" in caplog.text
+
+
 # ─── wiring ──────────────────────────────────────────────────────────────────
 
 
@@ -478,6 +652,7 @@ def test_register_wires_every_hook_command_middleware_and_locale(env):
         ("pre_tool_call", "pre_tool_call_identity"),
         ("pre_tool_call", "pre_tool_call_gate"),
         ("subagent_start", "on_subagent_start"),
+        ("post_approval_response", "on_approval_response"),
         ("post_api_request", "on_usage"),
         ("post_auxiliary_call", "on_usage"),
         ("transform_llm_output", "transform_llm_output"),
@@ -510,3 +685,22 @@ def test_the_manifest_names_the_plugin_and_the_hooks_it_registers():
 
     assert "name: cloudisp" in manifest and 'requires_hermes: ">=0.22"' in manifest
     assert all(f"- {hook}" in manifest for hook in ("pre_gateway_dispatch", "pre_tool_call", "post_api_request", "transform_llm_output"))
+
+
+# ─── deploy scripts ──────────────────────────────────────────────────────────
+
+DEPLOY_DIR = Path(__file__).resolve().parents[3] / "deploy" / "hermes-tenant"
+
+
+@pytest.mark.parametrize("script", ["new-tenant.sh", "host-setup.sh"])
+def test_the_deploy_scripts_configure_the_spanish_heartbeat_and_the_seen_tips(script):
+    text = (DEPLOY_DIR / script).read_text()
+    expected = {surface: "[" + ", ".join(phrases) + "]" for surface, phrases in strings.STATUS_PHRASES.items()}
+
+    assert f"cfg display.status_phrases.status '{expected['status']}'" in text
+    assert f"cfg display.status_phrases.generic '{expected['generic']}'" in text
+    assert "cfg display.status_phrases.mode replace" in text
+    assert "cfg onboarding.seen.busy_input_prompt true" in text
+    assert "cfg onboarding.seen.tool_progress_prompt true" in text
+    assert "cfg approvals.destructive_slash_confirm false" in text
+    assert "cfg display.platforms.telegram.long_running_notifications generic" in text

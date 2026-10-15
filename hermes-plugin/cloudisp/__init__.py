@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from . import core
+from . import core, patches
 
 log = logging.getLogger("cloudisp")
 
@@ -20,6 +20,7 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", core.pre_tool_call_identity)
     ctx.register_hook("pre_tool_call", core.pre_tool_call_gate)
     ctx.register_hook("subagent_start", core.on_subagent_start)
+    ctx.register_hook("post_approval_response", core.on_approval_response)
     ctx.register_hook("post_api_request", core.on_usage)
     ctx.register_hook("post_auxiliary_call", core.on_usage)
     ctx.register_hook("transform_llm_output", core.transform_llm_output)
@@ -32,6 +33,8 @@ def register(ctx) -> None:
         ctx.register_middleware("llm_request", core.scrub_request)
     except Exception as error:
         log.warning("cloudisp: prompt scrubbing is off (no llm_request middleware): %s", error)
+
+    patches.apply()
 
     for language in ("es", "en"):
         try:

@@ -10,9 +10,11 @@ verificó contra Hermes **v0.22.0+139 (`79651b7`)**; `requires_hermes: ">=0.22"`
 | Aviso al 80 % | `transform_llm_output` agrega «⚠️ … más del 80 % del cupo…» a la próxima respuesta, una vez por período (marca en `~/.cache/cloudisp-plugin/warned-*`). |
 | `/guia` | `register_command`: devuelve `guia.md` (generada por `npm run guide`) sin pasar por el modelo. |
 | Identidad del operador | `pre_tool_call` (`modify`) agrega `_operator` a toda llamada al MCP, desde las variables de sesión. Sin usuario → `_operator: null` (el MCP rechaza la escritura). |
-| Aprobación en español | `pre_tool_call` (`approve`): «✍️ Confirmá: <acción> — <argumentos>», con `rule_key` nueva por llamada (ni «sesión» ni «siempre» aprueban otra escritura). Los subagentes que escriben reciben `block`. |
+| Aprobación en español | `pre_tool_call` (`approve`): «✍️ Confirmá: <acción> — <argumentos>», con `rule_key` nueva por llamada. La tarjeta de Telegram se reescribe (parche, ver abajo): título «Necesito tu confirmación para esta acción», la acción en español en el recuadro, «Detalle: …», sólo **✅ Aprobar** y **❌ Denegar**. Los subagentes que escriben reciben `block`. |
+| Un «no» es definitivo | `post_approval_response` anota la confirmación denegada, vencida o cancelada; en ese mismo turno cualquier escritura recibe `block` («No la reintentes…»). Sólo un mensaje nuevo del operador abre otro turno. |
 | Consumo | `post_api_request` y `post_auxiliary_call`: `POST /agent/usage` desde un thread (3 s); si falla, cola `usage-spool-<perfil>.jsonl` y reintento (máx. 50) en el siguiente. |
-| Marcas fuera | `transform_llm_output` (respuesta), middleware `llm_request` (prompt: host, modelo, proveedor, marca) y un pack de textos `es`/`en` (banner de `/new`, líneas de progreso, comando desconocido). |
+| Marcas fuera | `transform_llm_output` (respuesta), middleware `llm_request` (prompt: host, modelo, proveedor, marca) y un pack de textos `es`/`en` (`strings.py`: banner de `/new`, progreso y latido, tarjetas de aprobación y de `clarify`, avisos de reinicio y de error, comando desconocido). |
+| Parches del runtime | `patches.py`, dos y con guarda (ver «Parches»): sin `(Recommended)` en las opciones de `clarify` y tarjeta de aprobación sin nombre de herramienta ni botones «sesión»/«siempre». |
 
 ## Instalación
 
@@ -47,7 +49,8 @@ plugin. Con el plugin cargado pero sin `write_tools.json` el registro falla (no 
 | `pre_tool_call` `modify` llega al MCP | **Sí**: `agent/tool_executor.py` ejecuta con los args modificados y `registry.dispatch` no valida contra el schema. Cada callback devuelve **una** directiva, por eso hay dos callbacks (`modify` y `approve`/`block`). Una excepción del hook no bloquea la llamada (por eso la identidad es fail-closed en el MCP). |
 | Prefijo de las herramientas MCP | `mcp__<servidor>__<herramienta>` (`tools/mcp_tool_schema.py`). |
 | Detección de subagente | Los kwargs de `pre_tool_call` son `tool_name, args, task_id, session_id, tool_call_id, turn_id, api_request_id`: **no hay `parent_session_id`**, y `HERMES_SESSION_SOURCE` no vale `subagent`. Se usa `subagent_start(child_session_id)` y `agent.delegation_context.is_delegated_child_context()` (el predicado que usa el propio motor). |
-| `approve` muestra la tarjeta con botones | **Sí**: `request_tool_approval` → `send_exec_approval`; Telegram dibuja botones y el texto es el `message`. El encabezado y los botones salen en español con `display.language es`. Límites: el recuadro de código muestra `<mcp__cloudisp__herramienta> (plugin approval rule)` y la tarjeta ofrece «sesión» y «siempre» (sin efecto sobre otras escrituras por la `rule_key` única; «siempre» deja una entrada inútil en la lista de permitidos). `/yolo` y `approvals.mode: off` saltean la tarjeta: `/yolo` queda bloqueado por el allowlist. |
+| `approve` muestra la tarjeta con botones | **Sí**: `request_tool_approval` → `send_exec_approval`; Telegram dibuja botones y el texto es el `message`. **Pero** el motor la arma sin que se pueda configurar: encabezado «Hermes quiere ejecutar un comando…» (cambia con la clave `gateway.exec_approval.header` del pack), un recuadro con `<mcp__cloudisp__herramienta> (plugin approval rule)` (nombre interno) y los botones «sesión» y «siempre» (`allow_session`/`allow_permanent` van fijos en `True`; no hay clave ni cadena que los oculte, y una etiqueta vacía rompe el botón). Por eso el parche de `send_exec_approval`. `/yolo` y `approvals.mode: off` saltean la tarjeta: `/yolo` queda bloqueado por el allowlist. |
+| `post_approval_response` | Se dispara también en el camino del gateway, desde el thread del agente, con `pattern_key` (`plugin_rule:<rule_key>`), `choice` (`once`/`session`/`always`/`deny`/`timeout`/`cancelled`/`notify_failed`), `session_id` y `turn_id`: los mismos que ve `pre_tool_call`. Con eso se bloquea el reintento del mismo turno. |
 | `post_api_request` | Los tokens vienen en el kwarg **`usage`** (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`; la entrada **no** incluye la caché), además de `model`, `provider`, `session_id`, `api_request_id`, `started_at`, `ended_at`. `post_auxiliary_call` trae lo mismo y también se reporta. |
 | `transform_llm_output(text, …)` | La firma real es `transform_llm_output(response_text, session_id, model, platform, turn_id)`; devuelve `str` o `None`. Corre antes de persistir la respuesta. |
 | `pre_progress` | **No existe** en v0.22 (no está en `VALID_HOOKS`); no se pueden renombrar las etiquetas de progreso por herramienta. Contingencia: el pack de textos reemplaza `gateway.progress.tool_preview` y `tool_pending` por «{emoji} Consultando CloudISP…», sin nombre de herramienta ni argumentos. Por eso **no hay `labels.json`**. Si en la matriz de pruebas aparece algún nombre interno, `display.platforms.telegram.tool_progress off`. |
@@ -67,12 +70,30 @@ Research)…», `Active Hermes profile: … /home/hermes/…`, el trailer `Model
 | Texto | Origen | Solución |
 | --- | --- | --- |
 | Banner de `/new` (modelo, proveedor, contexto, «Consejo: …») | `gateway/slash_commands_session.py::_handle_reset_command` | Pack de textos: `gateway.reset.header_*`, `gateway.reset.tip` y `gateway.session.info_*`. El aviso de reinicio por inactividad también. |
+| Tarjeta de `clarify`: «1. ✅ Confirmar (Recommended)» y «Responde "skip" para omitir…» | `tools/clarify_tool.py::mark_recommended` (constante en inglés, sin clave) y `gateway.clarify.skip_hint` | El hint se vacía con el pack; el marcador se saca con el parche `patch_clarify`. |
+| Latido «⏳ Trabajando — 0 min — receiving stream response … — mcp__cloudisp__reboot_onu» | `gateway/run_turn.py::_run_agent_notify_long_running`: con `long_running_notifications: true` agrega la última actividad (en inglés) y la herramienta en curso | `display.platforms.telegram.long_running_notifications generic` usa frases de `display.status_phrases` (en inglés por defecto): `display.status_phrases.mode replace` y las listas `status`/`generic` en español. El pack además quita el `{detail}` de `gateway.progress.working_heartbeat`. |
+| «💡 First-time tip — I just interrupted my current task… /busy queue…» y el de `/verbose` | `agent/onboarding.py`: texto fijo en inglés, se muestra una vez y queda en `onboarding.seen.<flag>` | Marcarlos como vistos: `onboarding.seen.busy_input_prompt true` y `onboarding.seen.tool_progress_prompt true` (host y perfil). |
+| Avisos de reinicio, apagado y error («Hermes está de vuelta…», «Usa /retry», `hermes doctor`) | `gateway.startup.online`, `gateway.shutdown.*`, `gateway.errors.*` | Pack de textos (con un canal principal el motor manda los de arranque y apagado). |
 | «No hay un canal principal configurado…» | `gateway/run_turn.py::_hmwa_first_contact_notes` | `TELEGRAM_HOME_CHANNEL=<id del usuario autorizado>` en el `.env` del perfil (también `hermes config set TELEGRAM_HOME_CHANNEL <id>`); el pack deja el texto vacío por si falta. |
 | Tarjeta de confirmación de `/new` | `approvals.destructive_slash_confirm` (por defecto `true`) | `false` en host y perfil. |
 | «Comando desconocido /xyz» | `gateway/run_inbound.py::_hm_unknown_slash_reply` | El hook intercepta antes; el pack lo reemplaza por si llega igual. |
 
+## Parches
+
+El plugin parchea dos funciones del runtime **en memoria** (sin tocar los archivos de Hermes), una sola vez y con guarda: si el
+destino cambia o no existe, registra un warning y el runtime sigue con su texto, nunca se cae.
+
+| Parche | Qué hace | Si falla |
+| --- | --- | --- |
+| `tools.clarify_tool.mark_recommended` → identidad | Las opciones de `clarify` salen tal cual («✅ Confirmar», sin «(Recommended)»). La limpieza de la respuesta del usuario sigue funcionando. | Aparece «(Recommended)». |
+| `gateway.platforms.base.BasePlatformAdapter.send_exec_approval` envuelto | Sólo si el comando es `<mcp__…> (plugin approval rule)` y la descripción empieza con «✍️ Confirmá: »: pone la acción y el detalle en español y pasa `allow_session=False`, `allow_permanent=False` (quedan Aprobar y Denegar). Cualquier otra aprobación sigue igual. | Tarjeta con el nombre interno y cuatro botones. |
+
+Verificados contra el código real de CT 108 (`BasePlatformAdapter` renderizando la tarjeta con el pack y el parche: «⚠️ Necesito tu confirmación…
+/ Reiniciar la ONU / Detalle: Abonado: 2861», botones Aprobar y Denegar), pero no dentro de un gateway vivo. Si una actualización de Hermes los rompe, la matriz de pruebas lo muestra en G8/G9.
+
 ## Límites conocidos
 
+- `display.busy_input_mode` queda en `interrupt` (default del motor): un mensaje que llega con una tarea en curso la interrumpe (y cancela una tarjeta de aprobación pendiente). `queue` la pone en cola; se cambia con `hermes config set display.busy_input_mode queue`.
 - Con el allowlist por defecto también quedan bloqueados `/stop`, `/approve` y `/deny` (las tarjetas de aprobación usan botones, no comandos); sumalos a `allowed_commands` si hacen falta.
 - Un operador por turno: la identidad sale de las variables de sesión del turno.
 - El pack de textos reemplaza el idioma `es` y `en` de todo el proceso (el host `default` también lo ve).

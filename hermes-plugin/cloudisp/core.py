@@ -26,6 +26,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .strings import (
+    APPROVAL_NO_DETAIL,
+    BLOCKED_COMMAND,
+    BLOCKED_TEXT,
+    DENIED_RETRY_TEXT,
+    LOCALE_OVERRIDES,
+    NEUTRAL_RESET_TEXT,
+    QUOTA_COMMAND,
+    QUOTA_EXHAUSTED_TEXT,
+    QUOTA_WARNING_TEXT,
+    STATUS_PHRASES,
+    SUBAGENT_WRITE_TEXT,
+)
+
 log = logging.getLogger("cloudisp")
 
 HERE = Path(__file__).resolve().parent
@@ -36,38 +50,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "bot_name": "Asistente CloudISP",
     "mcp_server": "cloudisp",
     "allowed_commands": ["new", "guia", "start"],
-}
-
-BLOCKED_COMMAND = "cloudisp-blocked"
-QUOTA_COMMAND = "cloudisp-quota"
-BLOCKED_TEXT = "Ese comando no está disponible. Escribí /guia para ver todo lo que puedo hacer."
-QUOTA_EXHAUSTED_TEXT = (
-    "⛔ Se agotó el cupo de uso del Asistente CloudISP para este período. "
-    "Contactá a tu administrador de CloudISP."
-)
-QUOTA_WARNING_TEXT = "⚠️ El Asistente CloudISP ya usó más del 80% del cupo de este período."
-SUBAGENT_WRITE_TEXT = (
-    "Los subagentes sólo pueden consultar; la acción la tiene que pedir el asistente principal con confirmación."
-)
-NEUTRAL_RESET_TEXT = "✨ Conversación nueva. Escribí /guia para ver lo que puedo hacer."
-
-# Strings the runtime itself says in chat (session reset banner, model/provider/context lines, tips,
-# progress lines with raw tool names, unknown commands). Registered as a language pack for `es` and
-# `en`, so the user never reads the model, the provider or an internal tool name.
-LOCALE_OVERRIDES: dict[str, str] = {
-    "gateway.reset.header_default": NEUTRAL_RESET_TEXT,
-    "gateway.reset.header_new": NEUTRAL_RESET_TEXT,
-    "gateway.reset.tip": "",
-    "gateway.session.info_model": "",
-    "gateway.session.info_provider": "",
-    "gateway.session.info_context": "",
-    "gateway.session.info_acting_model": "",
-    "gateway.session.info_endpoint": "",
-    "gateway.session.auto_reset_notice": "◐ La conversación se reinició por inactividad. Escribí /guia para ver lo que puedo hacer.",
-    "gateway.progress.tool_preview": "{emoji} Consultando CloudISP…",
-    "gateway.progress.tool_pending": "{emoji} Consultando CloudISP…",
-    "gateway.unknown_command": BLOCKED_TEXT,
-    "gateway.notify.no_home_channel": "",
 }
 
 CACHE_DIR_ENV = "CLOUDISP_PLUGIN_CACHE_DIR"
@@ -459,11 +441,18 @@ def summarize_args(args: dict | None, limit: int = 300) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def pre_tool_call_gate(tool_name: str = "", args: dict | None = None, session_id: str = "", **_: Any) -> dict | None:
+_denied_turns: OrderedDict[tuple[str, str], None] = OrderedDict()
+_MAX_DENIED_TURNS = 1000
+RULE_KEY_PREFIX = "cloudisp-write-"
+
+
+def pre_tool_call_gate(tool_name: str = "", args: dict | None = None, session_id: str = "", turn_id: str = "", **_: Any) -> dict | None:
     """Every write goes to human approval, with a rule key that is never reused.
 
     A fresh key per call means "approve for the session" or "always" can never approve another
-    write. Writes from subagents are refused outright.
+    write. Writes from subagents are refused outright, and so is any write after the operator
+    denied (or let expire) a confirmation earlier in the same turn: only a new message from the
+    operator starts a new turn and can ask again.
     """
     name = mcp_tool(tool_name, settings_for(session_profile())["mcp_server"])
 
@@ -473,13 +462,28 @@ def pre_tool_call_gate(tool_name: str = "", args: dict | None = None, session_id
     if is_subagent(session_id):
         return {"action": "block", "message": SUBAGENT_WRITE_TEXT}
 
+    if turn_id and (session_id, turn_id) in _denied_turns:
+        return {"action": "block", "message": DENIED_RETRY_TEXT}
+
     summary = summarize_args(args)
 
     return {
         "action": "approve",
         "message": f"✍️ Confirmá: {WRITE_TOOLS[name]}" + (f" — {summary}" if summary else ""),
-        "rule_key": f"cloudisp-write-{uuid.uuid4().hex}",
+        "rule_key": f"{RULE_KEY_PREFIX}{uuid.uuid4().hex}",
     }
+
+
+def on_approval_response(pattern_key: str = "", choice: str = "", session_id: str = "", turn_id: str = "", **_: Any) -> None:
+    """`post_approval_response`: remember a write confirmation that was not granted, so the same turn cannot ask again."""
+    if not str(pattern_key).startswith(f"plugin_rule:{RULE_KEY_PREFIX}") or choice in ("once", "session", "always"):
+        return
+
+    if turn_id:
+        _denied_turns[(session_id, turn_id)] = None
+
+        while len(_denied_turns) > _MAX_DENIED_TURNS:
+            _denied_turns.popitem(last=False)
 
 
 # ─── usage ledger ────────────────────────────────────────────────────────────

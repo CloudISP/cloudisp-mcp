@@ -138,7 +138,7 @@ svg text{font-family:-apple-system,"Segoe UI",sans-serif}
 <div class="cols c2" style="grid-template-columns:1.1fr 1fr">
 <div style="display:flex;flex-direction:column;gap:1.2vh;min-height:0">
 <div class="card"><h3>1 · Hermes</h3><p>Solo MCP <code>cloudisp</code>, <code>clarify</code> y <code>delegate_task</code>. Cada escritura exige aprobación humana (vence a 300 s = denegado). Allowlist de usuarios; en grupo, solo con @mención.</p></div>
-<div class="card"><h3>2 · MCP</h3><p>Catálogo cerrado. Rechaza escrituras si la búsqueda no da exactamente un abonado. Idempotency-Key y <code>requested_by</code> obligatorios. Redacta PII y contraseñas WiFi.</p></div>
+<div class="card"><h3>2 · MCP</h3><p>Catálogo cerrado. Rechaza escrituras si la búsqueda no da exactamente un abonado. Idempotency-Key obligatoria y operador identificado en cada pedido. Redacta PII y contraseñas WiFi.</p></div>
 <div class="card"><h3>3 · Admin (la frontera real)</h3><p>Scopes de la key, fence de plataforma, política <code>read|technician</code> con tope diario, y tier del actor: nunca más que un Técnico.</p></div>
 <div class="card"><h3>4 · Netwatcher</h3><p>Grant <code>network.device-tasks.create</code> del empleado, allowlist de operaciones y auditoría.</p></div>
 </div>
@@ -163,7 +163,7 @@ svg text{font-family:-apple-system,"Segoe UI",sans-serif}
 <div class="card"><h3>/new</h3><p>Empieza una conversación limpia. Úsalo al cambiar de tema o después de editar la KB en el admin: el agente vuelve a leer <code>cloudisp_context</code>.</p>
 <div class="chat" style="margin-top:1.4vh"><div class="b me">/new</div><div class="b bot">Sesión nueva. Cargué reglas y artículos de la KB.</div></div></div>
 </div>
-<p class="note">Cada pedido lleva tu nombre en <code>requested_by</code> para la auditoría.</p>
+<p class="note">Cada pedido queda registrado a tu nombre (tu usuario de Telegram) para la auditoría.</p>
 </section>
 
 <!-- 6 -->
@@ -175,11 +175,11 @@ svg text{font-family:-apple-system,"Segoe UI",sans-serif}
 <div class="b bot"><b>Confirmar reinicio de ONU</b><span class="ev">• Abonado: Marcos Rivadeo (#1234) · Pinares FTTH (3)</span><span class="ev">• ONU: MAC b464…e68 · modelo luna-v642</span><span class="ev">• Acción: reiniciar. Corta el servicio ~2 min.</span>
 <div class="btns"><span class="btn go">✅ Confirmar</span><span class="btn stop">❌ Cancelar</span><span class="btn">🔎 Diagnosticar primero</span></div></div>
 <div class="b me">✅ Confirmar</div>
-<div class="approval"><b>Aprobación requerida · reboot_onu</b><br>subscriber_id 1234 · requested_by «Ignacio»<div class="btns"><span class="btn go">Aprobar</span><span class="btn stop">Denegar</span></div><span class="note">Vence en 300 s: sin respuesta = denegado.</span></div>
+<div class="approval"><b>⚠️ Necesito tu confirmación para esta acción</b><br><code>Reiniciar la ONU</code><br>Detalle: Abonado: 1234<div class="btns"><span class="btn go">✅ Aprobar</span><span class="btn stop">❌ Denegar</span></div><span class="note">Si no respondés en 5 minutos, la acción NO se ejecuta.</span></div>
 </div>
 <div style="display:flex;flex-direction:column;gap:1.4vh">
 <div class="card"><h3>Paso a · <code>clarify</code> (modelo)</h3><p>El agente resume abonado, ID, plataforma, ONU, acción e impacto. Solo con ✅ llama la tool.</p></div>
-<div class="card"><h3>Paso b · Aprobación (harness)</h3><p>Hermes exige su propia tarjeta por cada tool de escritura. No depende del modelo: aunque el modelo se equivoque, nada corre sin tu aprobación.</p></div>
+<div class="card"><h3>Paso b · Aprobación (harness)</h3><p>El sistema exige una tarjeta de aprobación por cada acción de escritura. No depende del modelo: aunque el modelo se equivoque, nada corre sin tu aprobación.</p></div>
 <div class="card"><h3>Una acción, una confirmación</h3><p>Nunca encadena escrituras. Subagentes no pueden aprobar: si intentan escribir, la aprobación vence y se deniega.</p></div>
 </div>
 </div>
@@ -499,7 +499,7 @@ svg text{font-family:-apple-system,"Segoe UI",sans-serif}
 <span class="ev">• Impacto: pierde el servicio de inmediato.</span>
 <div class="btns"><span class="btn go">✅ Confirmar</span><span class="btn stop">❌ Cancelar</span><span class="btn">🔎 Diagnosticar primero</span></div></div>
 <div class="b me">✅ Confirmar</div>
-<div class="approval"><b>Aprobación requerida · disconnect_subscriber</b><br>scope internet · requested_by «Ignacio»<div class="btns"><span class="btn go">Aprobar</span><span class="btn stop">Denegar</span></div></div>
+<div class="approval"><b>⚠️ Necesito tu confirmación para esta acción</b><br><code>Cortar el servicio de un abonado</code><br>Detalle: Abonado: 1234 · Alcance: internet<div class="btns"><span class="btn go">✅ Aprobar</span><span class="btn stop">❌ Denegar</span></div><span class="note">Si no respondés en 5 minutos, la acción NO se ejecuta.</span></div>
 <div class="b me">Denegar</div>
 <div class="b bot"><b>Veredicto:</b> no se ejecutó nada. El abonado sigue activo.</div>
 </div>
@@ -589,14 +589,14 @@ svg text{font-family:-apple-system,"Segoe UI",sans-serif}
 <section class="slide">
 <h2><small>Preguntas</small>FAQ</h2>
 <div class="cols c2" style="align-content:start">
-<div class="card"><h3>¿Puede reiniciar una ONU sin que yo apruebe?</h3><p>No. Hace falta tu ✅ y además la aprobación de Hermes.</p></div>
-<div class="card"><h3>¿Quién figura como autor?</h3><p>El empleado «Agente IA NVS», con tu nombre en <code>requested_by</code>.</p></div>
+<div class="card"><h3>¿Puede reiniciar una ONU sin que yo apruebe?</h3><p>No. Hace falta tu ✅ y además la tarjeta de aprobación.</p></div>
+<div class="card"><h3>¿Quién figura como autor?</h3><p>El empleado «Agente IA NVS», con tu usuario de Telegram y tu nombre en la auditoría.</p></div>
 <div class="card"><h3>¿Por qué no usa SSH ni <code>ros</code>?</h3><p>Saltearía el RBAC, el fence de plataforma y la auditoría de CloudISP.</p></div>
 <div class="card"><h3>¿Ve contraseñas o teléfonos?</h3><p>No: el MCP redacta PII y contraseñas WiFi.</p></div>
 <div class="card"><h3>¿Y si el modelo se equivoca?</h3><p>La frontera real es el servidor: política, tier del actor y tope diario.</p></div>
 <div class="card"><h3>¿Cómo agrego a alguien del grupo?</h3><p>Se suma su Telegram user id a la allowlist del perfil.</p></div>
 <div class="card"><h3>¿En qué hora me muestra las fechas?</h3><p>En hora de Salta (−03:00): la API habla en UTC y el MCP las convierte antes de que el agente las vea.</p></div>
-<div class="card"><h3>¿Puede restablecer una ONU de fábrica?</h3><p>Sí, como último recurso: pide tu ✅ con el texto de confirmación y la aprobación de Hermes, y después hay que reaprovisionarla.</p></div>
+<div class="card"><h3>¿Puede restablecer una ONU de fábrica?</h3><p>Sí, como último recurso: pide tu ✅ con el texto de confirmación y la tarjeta de aprobación, y después hay que reaprovisionarla.</p></div>
 </div>
 </section>
 

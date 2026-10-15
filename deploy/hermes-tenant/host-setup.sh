@@ -46,5 +46,11 @@ cfg display.platforms.telegram.busy_ack_detail false
 cfg display.platforms.telegram.cleanup_progress false
 cfg approvals.destructive_slash_confirm false
 cfg onboarding.profile_build off
+# Latido y avisos únicos del motor: frases en español y sin los consejos en inglés (se marcan como ya vistos).
+cfg display.status_phrases.mode replace
+cfg display.status_phrases.status '[sigo en eso, sigo trabajando en tu pedido, todavía estoy consultando, esto tarda un poco pero sigo, esperando el resultado]'
+cfg display.status_phrases.generic '[en eso, un momento, consultando CloudISP]'
+cfg onboarding.seen.busy_input_prompt true
+cfg onboarding.seen.tool_progress_prompt true
 
 echo "host-setup: listo. Plugin enlazado en $HERMES_HOME_DIR/plugins/cloudisp; reiniciá hermes-gateway SÓLO sin turnos ni delegaciones en curso."

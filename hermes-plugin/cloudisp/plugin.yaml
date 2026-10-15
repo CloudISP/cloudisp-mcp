@@ -8,6 +8,7 @@ provides_hooks:
   - pre_gateway_dispatch
   - pre_tool_call
   - subagent_start
+  - post_approval_response
   - post_api_request
   - post_auxiliary_call
   - transform_llm_output

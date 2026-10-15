@@ -67,5 +67,6 @@ def env(tmp_path, monkeypatch, session):
     core._settings_cache.clear()
     core._quota_cache.clear()
     core._child_sessions.clear()
+    core._denied_turns.clear()
 
     return tmp_path

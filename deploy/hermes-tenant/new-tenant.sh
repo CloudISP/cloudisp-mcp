@@ -126,6 +126,12 @@ cfg platforms.telegram.extra.command_menu.max_commands 2
 # Lo que el prompt cuenta del equipo y del primer mensaje (el plugin limpia el resto).
 cfg agent.environment_probe false
 cfg onboarding.profile_build off
+# Latido y avisos únicos del motor: frases en español y sin los consejos en inglés (se marcan como ya vistos).
+cfg display.status_phrases.mode replace
+cfg display.status_phrases.status '[sigo en eso, sigo trabajando en tu pedido, todavía estoy consultando, esto tarda un poco pero sigo, esperando el resultado]'
+cfg display.status_phrases.generic '[en eso, un momento, consultando CloudISP]'
+cfg onboarding.seen.busy_input_prompt true
+cfg onboarding.seen.tool_progress_prompt true
 
 echo "new-tenant: perfil $PROFILE creado ($PROFILE_DIR) y entorno del MCP en $ENV_FILE (modo 600)."
 echo "Falta a mano:"

@@ -2160,7 +2160,7 @@ const TOOLS = [
             olt_id: { type: 'integer', description: 'Only ONUs of this OLT.' },
             pon_slot: { type: 'integer', description: 'Only ONUs of this PON slot (combine with olt_id and pon_port).' },
             pon_port: { type: 'integer', description: 'Only ONUs of this PON port (combine with olt_id and pon_slot).' },
-            platform_id: { type: 'integer', description: 'Only ONUs of this platform (2, 3, 4 or 15 for NVS).' },
+            platform_id: { type: 'integer', description: 'Only ONUs of this platform (id from cloudisp_context).' },
             product_class: { type: 'string', description: 'Exact model (ACS product_class), case-insensitive, as listed by list_onu_models.' },
             firmware: { type: 'string', description: 'Exact firmware version, case-insensitive, as listed by list_onu_models.' },
             offline_only: { type: 'boolean', description: 'Only offline ONUs.' },
@@ -2245,7 +2245,7 @@ const TOOLS = [
         'Logs de plataforma',
         'Syslog/event logs of one platform (router and OLT events). The range is at most 7 days and limit at most 500.',
         {
-            platform_id: { type: 'integer', description: 'Platform id (2, 3, 4 or 15 for NVS).' },
+            platform_id: { type: 'integer', description: 'Platform id (from cloudisp_context).' },
             since: { type: 'string', description: 'Start of the range (ISO 8601).' },
             until: { type: 'string', description: 'End of the range (ISO 8601).' },
             kind: { type: 'string', description: 'Event kind filter.' },
@@ -2424,7 +2424,7 @@ const TOOLS = [
         'network_snapshot',
         'Estado de red',
         'Latest online PPP session count and WAN throughput in Mbps, plus their collection timestamps. Without platform_id it aggregates every visible platform '
-        + 'and lists them in platforms[]; with platform_id (2, 3, 4 or 15 for NVS) only that one. This is not a 24-hour consumption report and not a saturation '
+        + 'and lists them in platforms[]; with platform_id (from cloudisp_context) only that one. This is not a 24-hour consumption report and not a saturation '
         + 'percentage (use usage_ranking / subscriber_usage for traffic); usage_24h.available is always false because RADIUS accounting is not exposed here.',
         { platform_id: { type: 'integer', description: 'Only this platform; default all visible platforms.' } },
         networkSnapshot,
@@ -2434,7 +2434,7 @@ const TOOLS = [
         'Modelos de ONU',
         'ONU fleet grouped by model and firmware, from the ACS observations: [{product_class, firmware, sync_template, onus, online, offline}]. '
         + 'Use it to answer "how many ONUs of model X / firmware Y"; then list_onus with product_class and firmware gives the subscribers.',
-        { platform_id: { type: 'integer', description: 'Only this platform (2, 3, 4 or 15 for NVS); default all visible platforms.' } },
+        { platform_id: { type: 'integer', description: 'Only this platform (id from cloudisp_context); default all visible platforms.' } },
         listOnuModels,
     ),
     readTool(
@@ -2499,7 +2499,7 @@ const TOOLS = [
     readTool(
         'list_eoc_masters',
         'Masters EoC',
-        'EoC masters (La Merced): id, name, platform, status / last seen and counted CPEs. Credentials are never exposed; masters are read-only for the agent.',
+        'EoC masters (coaxial/EPON gear): id, name, platform, status / last seen and counted CPEs. Credentials are never exposed; masters are read-only for the agent.',
         { platform_id: { type: 'integer', description: 'Only this platform; default all visible platforms.' } },
         listEocMasters,
     ),
