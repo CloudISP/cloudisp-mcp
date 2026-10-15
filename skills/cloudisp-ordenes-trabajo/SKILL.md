@@ -60,6 +60,7 @@ nueva y se hace en dos pasos, cada uno con su confirmación:
    `network_onu_id`, `serial` y `mac` de esa coincidencia; `ssid_24`, `ssid_5`,
    `wifi_password` y `keep_password` solo si los pide. Espera hasta 110 s.
    `onu_serial_mismatch`, `onu_mac_mismatch` u `onu_not_found` → volvé a ubicarla.
+   `onu_belongs_to_other_client` → la ONU es de otro abonado: no sigas.
 
 ## Asignar — `assign_work_order`
 

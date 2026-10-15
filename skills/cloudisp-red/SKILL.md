@@ -42,9 +42,10 @@ MB/GB y velocidades en Mbps (los `*_bps` dividen por 1.000.000).
   con un motivo: es "no disponible", **no** es consumo cero.
 - **`usage_ranking`** (`window`: `24h` o `7d`; `order`: `asc` = menos tráfico
   primero, `desc` = más; `limit` hasta 50; filtros `platform_id`, `olt_id`,
-  `pon_slot`, `pon_port`). Los abonados de `no_data` no tienen muestras: listalos
-  aparte y no los cuentes como "menos tráfico". "¿Qué ONU tiene menos tráfico?" →
-  `order: asc`, y cruzá cada `client_id` con `list_onus` o `get_subscriber`.
+  `pon_slot`, `pon_port`). Los abonados de `no_data` (con `no_data_total` el total)
+  no tienen muestras: listalos aparte y no los cuentes como "menos tráfico".
+  "¿Qué ONU tiene menos tráfico?" → `order: asc`, y cruzá cada `client_id` con
+  `list_onus` o `get_subscriber`.
 - **`live_traffic`**: tráfico de la sesión PPPoE **ahora**: `download_bps` y
   `upload_bps`. Arranca una observación corta en el router, así que puede tardar
   unos segundos; si responde `pending`, volvé a llamarlo.

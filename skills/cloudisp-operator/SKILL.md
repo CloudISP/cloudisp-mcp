@@ -143,6 +143,8 @@ Los nombres de arriba valen en todos los agentes; cambia cómo se presentan:
 | `kick_unavailable` | `kick_pppoe`: el RADIUS no puede cerrar la sesión. Informalo; no reintentes. |
 | `password_unknown` | `onu_read` con `onu.wifi_password_check`: CloudISP no tiene registrada la clave de esa red. |
 | `invalid_mac` / `onu_not_found` / `onu_serial_mismatch` / `onu_mac_mismatch` | Cambio de ONU: la MAC o el serial no coinciden con lo que ubicó `locate_new_onu`. Volvé a ubicarla; no fuerces. |
+| `onu_belongs_to_other_client` | Cambio de ONU: la ONU nueva ya está vinculada a otro abonado. No sigas; decilo. |
+| `olt_not_found` | Cambio de ONU: la OLT no existe en la plataforma del abonado. Informalo. |
 
 ## Skills relacionadas
 

@@ -2531,7 +2531,7 @@ const TOOLS = [
         'swap_onu',
         'Cambiar ONU',
         'Swap the subscriber\'s ONU for the new one found by locate_new_onu: provisions it with the subscriber\'s PPPoE/management/WiFi configuration and relinks the subscriber. '
-        + 'The subscriber loses service while it happens. Waits up to 110 s and returns the task projection. Refusals: invalid_mac, onu_not_found, onu_serial_mismatch, onu_mac_mismatch.',
+        + 'The subscriber loses service while it happens. Waits up to 110 s and returns the task projection. Refusals: invalid_mac, onu_not_found, onu_serial_mismatch, onu_mac_mismatch, onu_belongs_to_other_client.',
         {
             ...SUBSCRIBER_PROPERTIES,
             network_onu_id: { type: 'integer', description: 'network_onu_id of the match found by locate_new_onu.' },

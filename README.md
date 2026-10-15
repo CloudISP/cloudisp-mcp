@@ -178,7 +178,7 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `optimize_wifi` | `POST /subscribers/{id}/onu/actions` (`onu.wifi_optimize`, `preview`/`apply`) | `devices:operate` | escritura |
 | `restore_wifi` | `POST /subscribers/{id}/onu/actions` (`onu.wifi_restore`) | `devices:operate` | escritura |
 | `reprovision_onu` | `POST /subscribers/{id}/onu/provision` | `devices:operate` | escritura |
-| `kick_pppoe` | `POST /subscribers/{id}/pppoe/kick` | `subscribers:write` | escritura, destructiva |
+| `kick_pppoe` | `POST /subscribers/{id}/pppoe/kick` | `devices:operate` | escritura, destructiva |
 | `locate_new_onu` | `POST /subscribers/{id}/onu/swap/locate` + `GET /tasks/{id}` | `devices:operate` | escritura |
 | `swap_onu` | `POST /subscribers/{id}/onu/swap` | `devices:operate` | escritura |
 
