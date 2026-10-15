@@ -1,0 +1,21 @@
+{
+  "reboot_onu": "Reiniciar la ONU",
+  "set_onu_catv": "Activar o desactivar el CATV",
+  "change_subscriber_wifi": "Cambiar el WiFi",
+  "change_wifi_radio": "Cambiar el canal del WiFi",
+  "sync_onu": "Sincronizar la ONU",
+  "change_subscriber_plan": "Cambiar el plan de un abonado",
+  "change_subscriber_bandwidth": "Cambiar el perfil de velocidad",
+  "disconnect_subscriber": "Cortar el servicio de un abonado",
+  "reconnect_subscriber": "Reconectar el servicio de un abonado",
+  "create_work_order": "Crear una orden de trabajo",
+  "assign_work_order": "Asignar una orden de trabajo",
+  "set_onu_admin_state": "Habilitar o deshabilitar la ONU en la OLT",
+  "factory_reset_onu": "Restablecer la ONU de fábrica",
+  "optimize_wifi": "Optimizar el WiFi",
+  "restore_wifi": "Restaurar el WiFi",
+  "reprovision_onu": "Reaprovisionar la ONU",
+  "kick_pppoe": "Cerrar la sesión de conexión (PPPoE)",
+  "locate_new_onu": "Ubicar una ONU nueva por MAC",
+  "swap_onu": "Cambiar la ONU de un abonado"
+}

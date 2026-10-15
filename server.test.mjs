@@ -6,11 +6,15 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { PassThrough } from 'node:stream';
 
-import { awaitTask, dispatch, listTools, REDACTED_KEYS, startServer, toDisplayTime } from './server.mjs';
+import { renderGuide, renderWriteTools } from './lib/guide.mjs';
+import { awaitTask, dispatch, guideCatalog, listTools, REDACTED_KEYS, startServer, toDisplayTime } from './server.mjs';
 
 const SERVER_PATH = fileURLToPath(new URL('./server.mjs', import.meta.url));
 const API_BASE = 'https://admin.cloudisp.test';
@@ -53,7 +57,7 @@ const READ_TOOL_NAMES = [
     'run_report', 'list_internet_profiles', 'list_plans', 'list_invoices', 'find_work_orders',
     'get_work_order', 'find_technician', 'network_snapshot',
     'list_onu_models', 'subscriber_usage', 'usage_ranking', 'device_tasks', 'get_router', 'olt_poll_runs',
-    'list_eoc_masters', 'live_traffic',
+    'list_eoc_masters', 'live_traffic', 'export_report', 'build_report',
 ];
 
 const WRITE_TOOL_NAMES = [
@@ -64,8 +68,13 @@ const WRITE_TOOL_NAMES = [
     'locate_new_onu', 'swap_onu',
 ];
 
+/** The operator the agent runtime injects as the hidden `_operator` argument (Telegram DM). */
+const OPERATOR = {
+    id: '941533777', name: 'Marcos Rivadeo', channel: 'telegram', conversation: 'agent:main:telegram:dm:941533777', profile: 'cloudisp-nvs',
+};
+
 /** Arguments every write tool requires. */
-const WRITE_ARGS = { idempotency_key: 'op-1', requested_by: 'Marcos Rivadeo' };
+const WRITE_ARGS = { idempotency_key: 'op-1', _operator: OPERATOR };
 
 /**
  * Virtual clock for task polling: `sleep` advances `now`, so a 40 s budget costs no real time.
@@ -800,21 +809,39 @@ test('assign_installation no longer exists', async () => {
     assert.equal(calls.length, 0);
 });
 
-// ─── requested_by ────────────────────────────────────────────────────────────
+// ─── _operator ───────────────────────────────────────────────────────────────
 
-test('every write tool refuses a missing requested_by without any HTTP call', async () => {
+const REQUIRE_OPERATOR = { ...WRITES_ON, CLOUDISP_REQUIRE_OPERATOR: '1' };
+
+test('with CLOUDISP_REQUIRE_OPERATOR=1 every write tool refuses a missing or malformed _operator without any HTTP call', async () => {
+    const malformed = [undefined, {}, { id: '', channel: 'telegram' }, { id: '941533777' }, { id: 'a b', channel: 'telegram' }, { id: '9', channel: 'Tele gram' }, 'telegram:9'];
+
     for (const name of WRITE_TOOL_NAMES) {
-        const { result, calls } = await run(name, { idempotency_key: 'op-1', subscriber_id: 42 });
+        for (const _operator of malformed) {
+            const api = mockApi({});
+            const result = await dispatch(name, { idempotency_key: 'op-1', subscriber_id: 42, _operator }, api.fetchImpl, REQUIRE_OPERATOR, virtualClock());
 
-        assert.equal(result.outcome, 'validation_failed', name);
-        assert.match(result.message, /requested_by/, name);
-        assert.equal(calls.length, 0, name);
+            assert.equal(result.ok, false, name);
+            assert.equal(result.outcome, 'operator_required', name);
+            assert.equal(result.hint, 'No se pudo identificar al operador; la acción no se ejecutó.', name);
+            assert.equal(api.calls.length, 0, name);
+        }
     }
+});
+
+test('without CLOUDISP_REQUIRE_OPERATOR a write still goes out, carrying only the tool header', async () => {
+    const { calls } = await run('change_subscriber_plan', { idempotency_key: 'op-1', subscriber_id: 42, plan_id: 8 }, {
+        'POST /subscribers/42/plan': jsonResponse({ success: true, data: {} }),
+    });
+
+    assert.equal(calls[0].headers['X-CloudISP-Tool'], 'change_subscriber_plan');
+    assert.equal(calls[0].headers['X-CloudISP-Operator-Id'], undefined);
+    assert.equal(calls[0].headers['X-CloudISP-Requested-By'], undefined);
 });
 
 test('every write tool refuses a missing idempotency_key without any HTTP call', async () => {
     for (const name of WRITE_TOOL_NAMES) {
-        const { result, calls } = await run(name, { requested_by: 'Ana', subscriber_id: 42 });
+        const { result, calls } = await run(name, { _operator: OPERATOR, subscriber_id: 42 });
 
         assert.equal(result.outcome, 'validation_failed', name);
         assert.match(result.message, /idempotency_key/, name);
@@ -822,24 +849,62 @@ test('every write tool refuses a missing idempotency_key without any HTTP call',
     }
 });
 
-test('requested_by reaches the API as an ASCII header and is refused beyond 120 characters', async () => {
-    const routes = { 'POST /subscribers/42/plan': jsonResponse({ success: true, data: {} }) };
-    const accented = await run('change_subscriber_plan', { ...WRITE_ARGS, requested_by: 'Peña Ñandú 🚀', subscriber_id: 42, plan_id: 8 }, routes);
+test('the _operator reaches the API as the five identity headers, on every request of the call', async () => {
+    const { calls } = await run('change_subscriber_bandwidth', { ...WRITE_ARGS, subscriber_query: 'Perez', profile_id: 5 }, {
+        'GET /subscribers': ONE_SUBSCRIBER,
+        'POST /subscribers/42/bandwidth': jsonResponse({ success: true, data: {} }),
+    });
 
-    assert.equal(accented.calls[0].headers['X-CloudISP-Requested-By'], 'Pena Nandu');
+    assert.equal(calls.length, 2);
 
-    for (const requested_by of ['x'.repeat(121), '   ', '🚀']) {
-        const refused = await run('change_subscriber_plan', { ...WRITE_ARGS, requested_by, subscriber_id: 42, plan_id: 8 }, routes);
-
-        assert.equal(refused.result.outcome, 'validation_failed', requested_by);
-        assert.equal(refused.calls.length, 0);
+    for (const call of calls) {
+        assert.equal(call.headers['X-CloudISP-Operator-Id'], 'telegram:941533777');
+        assert.equal(call.headers['X-CloudISP-Requested-By'], 'Marcos Rivadeo');
+        assert.equal(call.headers['X-CloudISP-Channel'], 'telegram');
+        assert.equal(call.headers['X-CloudISP-Conversation'], 'agent:main:telegram:dm:941533777');
+        assert.equal(call.headers['X-CloudISP-Tool'], 'change_subscriber_bandwidth');
     }
 });
 
-test('read tools carry no requested_by header', async () => {
-    const { calls } = await run('find_subscriber', { query: 'Perez' }, { 'GET /subscribers': ONE_SUBSCRIBER });
+test('the operator name is ASCII-folded and cut to 120 characters; an empty name falls back to the operator ref', async () => {
+    const routes = { 'POST /subscribers/42/plan': jsonResponse({ success: true, data: {} }) };
+    const args = { idempotency_key: 'op-1', subscriber_id: 42, plan_id: 8 };
+    const accented = await run('change_subscriber_plan', { ...args, _operator: { ...OPERATOR, name: 'Peña Ñandú 🚀' } }, routes);
+    const long = await run('change_subscriber_plan', { ...args, _operator: { ...OPERATOR, name: 'x'.repeat(300) } }, routes);
+    const unnamed = await run('change_subscriber_plan', { ...args, _operator: { ...OPERATOR, name: '🚀' } }, routes);
 
-    assert.equal(calls[0].headers['X-CloudISP-Requested-By'], undefined);
+    assert.equal(accented.calls[0].headers['X-CloudISP-Requested-By'], 'Pena Nandu');
+    assert.equal(long.calls[0].headers['X-CloudISP-Requested-By'].length, 120);
+    assert.equal(unnamed.calls[0].headers['X-CloudISP-Requested-By'], 'telegram:941533777');
+});
+
+test('the channel header is sent only for telegram, cli and api; the conversation is cut to 128 printable characters', async () => {
+    const routes = { 'GET /subscribers': ONE_SUBSCRIBER };
+    const matrix = await run('find_subscriber', { query: 'Perez', _operator: { ...OPERATOR, channel: 'matrix', conversation: `a\nb${'c'.repeat(200)}` } }, routes);
+    const cli = await run('find_subscriber', { query: 'Perez', _operator: { ...OPERATOR, channel: 'cli' } }, routes);
+
+    assert.equal(matrix.calls[0].headers['X-CloudISP-Operator-Id'], 'matrix:941533777');
+    assert.equal(matrix.calls[0].headers['X-CloudISP-Channel'], undefined);
+    assert.equal(matrix.calls[0].headers['X-CloudISP-Conversation'].length, 128);
+    assert.ok(!/[\x00-\x1f]/.test(matrix.calls[0].headers['X-CloudISP-Conversation']));
+    assert.equal(cli.calls[0].headers['X-CloudISP-Channel'], 'cli');
+});
+
+test('read tools carry the tool header always and the identity headers when the operator is known', async () => {
+    const anonymous = await run('find_subscriber', { query: 'Perez' }, { 'GET /subscribers': ONE_SUBSCRIBER });
+    const known = await run('find_subscriber', { query: 'Perez', _operator: OPERATOR }, { 'GET /subscribers': ONE_SUBSCRIBER });
+
+    assert.deepEqual(Object.keys(anonymous.calls[0].headers).filter((name) => name.startsWith('X-CloudISP-')), ['X-CloudISP-Tool']);
+    assert.equal(anonymous.calls[0].headers['X-CloudISP-Tool'], 'find_subscriber');
+    assert.equal(known.calls[0].headers['X-CloudISP-Operator-Id'], 'telegram:941533777');
+});
+
+test('_operator is stripped before the handler: it never reaches a query string or a body', async () => {
+    const { calls } = await run('find_subscriber', { query: 'Perez', _operator: OPERATOR }, { 'GET /subscribers': ONE_SUBSCRIBER });
+    const write = await run('change_subscriber_plan', { ...WRITE_ARGS, subscriber_id: 42, plan_id: 8 }, { 'POST /subscribers/42/plan': jsonResponse({ success: true, data: {} }) });
+
+    assert.equal(calls[0].query.has('_operator'), false);
+    assert.deepEqual(write.calls[0].body, { plan_id: 8 });
 });
 
 // ─── awaitTask ───────────────────────────────────────────────────────────────
@@ -957,7 +1022,7 @@ test('annotations: every read is read-only (device reads included), every write 
     }
 });
 
-test('every write tool starts with the confirmation prefix and requires idempotency_key and requested_by', async () => {
+test('every write tool starts with the confirmation prefix and requires only idempotency_key; no schema exposes the operator', async () => {
     const tools = await listedTools({ CLOUDISP_ALLOW_WRITES: '1' });
 
     for (const name of WRITE_TOOL_NAMES) {
@@ -965,11 +1030,16 @@ test('every write tool starts with the confirmation prefix and requires idempote
 
         assert.ok(tool.description.startsWith('ESCRITURA (requiere confirmación del operador): '), name);
         assert.ok(tool.inputSchema.required.includes('idempotency_key'), name);
-        assert.ok(tool.inputSchema.required.includes('requested_by'), name);
+        assert.ok(!tool.inputSchema.required.includes('requested_by'), name);
+        assert.ok(!('requested_by' in tool.inputSchema.properties), name);
     }
 
     for (const name of READ_TOOL_NAMES) {
         assert.ok(!tools.find((candidate) => candidate.name === name).description.startsWith('ESCRITURA'), name);
+    }
+
+    for (const tool of tools) {
+        assert.ok(!('_operator' in tool.inputSchema.properties), tool.name);
     }
 });
 
@@ -999,7 +1069,7 @@ test('initialize hands over the condensed core rules, cloudisp_context first', a
 
     const { instructions, serverInfo } = decodeMessages(Buffer.from(written.join(''), 'utf8'))[0].result;
 
-    assert.equal(serverInfo.version, '0.4.0');
+    assert.equal(serverInfo.version, '0.5.0');
     assert.ok(instructions.startsWith('Llamá cloudisp_context al iniciar cada conversación y antes de delegar'));
     assert.equal(instructions.split('\n').length, 6);
 });
@@ -1257,7 +1327,7 @@ test('stdio smoke: newline framing answers initialize and lists every tool with 
     const initialize = messages.find((message) => message.id === 1);
     assert.equal(initialize.result.protocolVersion, '2025-06-18');
     assert.equal(initialize.result.serverInfo.name, 'cloudisp-mcp');
-    assert.equal(initialize.result.serverInfo.version, '0.4.0');
+    assert.equal(initialize.result.serverInfo.version, '0.5.0');
     assert.match(initialize.result.instructions, /CLOUDISP_ALLOW_WRITES=1/);
     assert.ok(initialize.result.capabilities.tools);
 
@@ -1816,7 +1886,7 @@ test('onu_read onu.wifi_password_check runs onu.wifi_read first and posts ssid_i
 
 const OPTIMIZE_PLAN = [{ control: 'channel', band: '2.4', from: 6, to: 11 }];
 
-test('the new ONU writes post their operation or endpoint with the idempotency key and requested_by, then await the task', async () => {
+test('the new ONU writes post their operation or endpoint with the idempotency key and the operator headers, then await the task', async () => {
     const cases = [
         ['set_onu_admin_state', { admin_state: 'disable' }, '/onu/actions', { operation: 'olt.onu_admin_state', parameters: { admin_state: 'disable' } }],
         ['factory_reset_onu', { confirm: 'factory_reset' }, '/onu/actions', { operation: 'onu.factory_reset', parameters: { confirm: 'factory_reset' } }],
@@ -1962,4 +2032,252 @@ test('wifi_password never reaches the model, even when the API echoes it', async
 
     assert.equal(payload.result.name, 'Casa');
     assert.equal(JSON.stringify(payload).includes('S3cr3t'), false);
+});
+
+// ─── v0.5.0: report files ────────────────────────────────────────────────────
+
+/**
+ * Build a `fetch` double response that carries a file.
+ *
+ * @param {Buffer} bytes File content.
+ * @param {string} contentType Content-Type of the answer.
+ * @return {object}
+ */
+function fileResponse(bytes, contentType) {
+    return {
+        ok: true,
+        status: 200,
+        headers: { get: (name) => (name.toLowerCase() === 'content-type' ? contentType : null) },
+        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+        json: async () => { throw new Error('not json'); },
+    };
+}
+
+/**
+ * Dispatch a tool with writes on and a fresh artifact directory.
+ *
+ * @param {string} name Tool name.
+ * @param {object} args Tool arguments.
+ * @param {Record<string, object|Function>} [routes] Route table.
+ * @return {Promise<{ result: object, calls: Array<object>, dir: string }>}
+ */
+async function runWithArtifacts(name, args, routes = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudisp-artifacts-'));
+    const api = mockApi(routes);
+    const result = await dispatch(name, args, api.fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir }, virtualClock());
+
+    return { result, calls: api.calls, dir };
+}
+
+test('export_report saves the PDF in the artifact directory and answers its MEDIA line', async () => {
+    const pdf = Buffer.from('%PDF-1.7 fake');
+    const { result, calls, dir } = await runWithArtifacts(
+        'export_report',
+        { key: 'workorders', format: 'pdf', from: '2026-10-01', to: '2026-10-15', platform_id: 2, _operator: OPERATOR },
+        { 'GET /reports/workorders': fileResponse(pdf, 'application/pdf') },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(path.dirname(result.path), dir);
+    assert.match(path.basename(result.path), /^reporte-workorders-\d{14}\.pdf$/);
+    assert.equal(result.media, `MEDIA:${result.path}`);
+    assert.equal(result.bytes, pdf.length);
+    assert.deepEqual(fs.readFileSync(result.path), pdf);
+    assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
+    assert.equal(calls[0].query.get('format'), 'pdf');
+    assert.equal(calls[0].query.get('from'), '2026-10-01');
+    assert.equal(calls[0].query.get('to'), '2026-10-15');
+    assert.equal(calls[0].query.get('platform_id'), '2');
+    assert.equal(calls[0].headers['X-CloudISP-Tool'], 'export_report');
+    assert.equal(calls[0].headers['X-CloudISP-Operator-Id'], 'telegram:941533777');
+});
+
+test('export_report also saves a CSV, and refuses a bad key, format or date before any HTTP call', async () => {
+    const csv = await runWithArtifacts('export_report', { key: 'alerts', format: 'csv' }, {
+        'GET /reports/alerts': fileResponse(Buffer.from('a;b\n1;2\n'), 'text/csv; charset=UTF-8'),
+    });
+
+    assert.match(path.basename(csv.result.path), /^reporte-alerts-\d{14}\.csv$/);
+
+    for (const args of [{ key: '../x', format: 'pdf' }, { key: 'alerts', format: 'xlsx' }, { key: 'alerts' }, { key: 'alerts', format: 'pdf', from: '15/10/2026' }]) {
+        const { result, calls } = await runWithArtifacts('export_report', args);
+
+        assert.equal(result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(calls.length, 0);
+    }
+});
+
+test('export_report answers API refusals as outcomes and a wrong content type as an error', async () => {
+    const refused = await runWithArtifacts('export_report', { key: 'alerts', format: 'pdf' }, {
+        'GET /reports/alerts': errorResponse(422, { code: 'validation_failed', message: 'format must be pdf or csv.' }),
+    });
+
+    assert.equal(refused.result.outcome, 'validation_failed');
+    assert.deepEqual(fs.readdirSync(refused.dir), []);
+
+    const html = await runWithArtifacts('export_report', { key: 'alerts', format: 'pdf' }, {
+        'GET /reports/alerts': fileResponse(Buffer.from('<html>'), 'text/html'),
+    });
+
+    assert.equal(html.result.outcome, 'unexpected_response');
+
+    const json = await runWithArtifacts('export_report', { key: 'alerts', format: 'pdf' }, {
+        'GET /reports/alerts': { ...jsonResponse({ success: true, data: { rows: [] } }), headers: { get: () => 'application/json' } },
+    });
+
+    assert.equal(json.result.outcome, 'unexpected_response');
+});
+
+test('every artifact write first deletes the files older than 24 hours', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudisp-artifacts-'));
+    const stale = path.join(dir, 'viejo.pdf');
+    const fresh = path.join(dir, 'reciente.pdf');
+
+    fs.writeFileSync(stale, 'x');
+    fs.writeFileSync(fresh, 'x');
+    fs.utimesSync(stale, new Date(Date.now() - 25 * 3600 * 1000), new Date(Date.now() - 25 * 3600 * 1000));
+
+    const api = mockApi({});
+    const result = await dispatch('build_report', { title: 'T', sections: [{ heading: 'H' }] }, api.fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir }, virtualClock());
+
+    assert.equal(result.ok, true);
+    assert.equal(fs.existsSync(stale), false);
+    assert.equal(fs.existsSync(fresh), true);
+});
+
+test('the artifact directory is created with mode 700 when it does not exist', async () => {
+    const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cloudisp-artifacts-')), 'nested', 'out');
+    const result = await dispatch('build_report', { title: 'T', sections: [{ heading: 'H' }] }, mockApi({}).fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir }, virtualClock());
+
+    assert.equal(result.ok, true);
+    assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+});
+
+test('build_report writes a self-contained HTML file with the KPIs, the table and the SVG charts, and makes no API call', async () => {
+    const { result, calls } = await runWithArtifacts('build_report', {
+        title: 'Consumo de la PON 8 · 300 Viviendas',
+        subtitle: 'Octubre 2026',
+        sections: [
+            {
+                heading: 'Resumen',
+                text: 'Primera línea.\n\nSegundo párrafo con <b>etiquetas</b> & símbolos.',
+                kpis: [{ label: 'Abonados', value: 41 }, { label: 'Tráfico', value: null }],
+            },
+            {
+                heading: 'Consumo diario',
+                chart: { type: 'bar', categories: ['Lun', 'Mar', 'Mié'], series: [{ name: 'GB', data: [10, null, 30] }], unit: 'GB' },
+                table: { columns: ['Abonado', 'GB'], rows: [['#2861', 12.5], ['#4979', null]] },
+            },
+            { heading: 'Evolución', chart: { type: 'line', categories: ['a', 'b', 'c', 'd'], series: [{ name: 'Mbps', data: [1, 2, null, 4] }] } },
+            { heading: 'Reparto', chart: { type: 'donut', categories: ['Pinares', 'Cerrillos'], series: [{ name: 'ONU', data: [30, 70] }] } },
+        ],
+    });
+
+    assert.deepEqual(calls, []);
+    assert.equal(result.ok, true);
+    assert.match(path.basename(result.path), /^informe-consumo-de-la-pon-8-300-viviendas-\d{14}\.html$/);
+    assert.equal(result.media, `MEDIA:${result.path}`);
+
+    const html = fs.readFileSync(result.path, 'utf8');
+
+    assert.equal(result.bytes, Buffer.byteLength(html));
+    assert.match(html, /^<!doctype html>/);
+    assert.match(html, /<html lang="es">/);
+    assert.match(html, /src="data:image\/png;base64,/);
+    assert.equal((html.match(/<svg /g) ?? []).length, 3);
+    assert.match(html, /Generado por el Asistente CloudISP · \d{2}\/\d{2}\/\d{4} \d{2}:\d{2}/);
+    assert.match(html, /@media print/);
+    assert.match(html, /&lt;b&gt;etiquetas&lt;\/b&gt; &amp; símbolos/, 'text is escaped');
+    assert.equal(html.includes('<b>etiquetas</b>'), false);
+    assert.match(html, /<b class="nd">no disponible<\/b>/, 'a null KPI is "no disponible", never 0');
+    assert.match(html, /<td class="nd">no disponible<\/td>/, 'a null table cell is "no disponible"');
+    assert.match(html, /Sin dato \(no disponible\): GB \(Mar\)\./, 'a null chart value is captioned');
+    assert.equal(/<script|https?:\/\//.test(html.replaceAll('http://www.w3.org/2000/svg', '')), false, 'no scripts, no external requests');
+});
+
+test('build_report refuses malformed reports before writing anything', async () => {
+    const section = (extra) => ({ heading: 'H', ...extra });
+    const cases = [
+        {},
+        { title: 'T' },
+        { title: 'T', sections: [] },
+        { title: 'T', sections: Array.from({ length: 21 }, () => section()) },
+        { title: '  ', sections: [section()] },
+        { title: 'T', sections: [{ text: 'sin encabezado' }] },
+        { title: 'T', sections: [section({ table: { columns: ['a', 'b'], rows: [['solo uno']] } })] },
+        { title: 'T', sections: [section({ table: { columns: ['a'], rows: Array.from({ length: 201 }, () => ['x']) } })] },
+        { title: 'T', sections: [section({ chart: { type: 'pie', categories: ['a'], series: [{ name: 's', data: [1] }] } })] },
+        { title: 'T', sections: [section({ chart: { type: 'bar', categories: ['a', 'b'], series: [{ name: 's', data: [1] }] } })] },
+        { title: 'T', sections: [section({ chart: { type: 'bar', categories: ['a'], series: [{ name: 's', data: ['1'] }] } })] },
+        { title: 'T', sections: [section({ chart: { type: 'donut', categories: ['a', 'b'], series: [{ name: 's', data: [1, 2] }, { name: 't', data: [1, 2] }] } })] },
+        { title: 'T', sections: [section({ chart: { type: 'donut', categories: ['a'], series: [{ name: 's', data: [-1] }] } })] },
+    ];
+
+    for (const args of cases) {
+        const { result, dir } = await runWithArtifacts('build_report', args);
+
+        assert.equal(result.outcome, 'validation_failed', JSON.stringify(args).slice(0, 120));
+        assert.deepEqual(fs.readdirSync(dir), []);
+    }
+});
+
+test('the report tools are read-only and tell the agent to include the media line', async () => {
+    const tools = await listedTools({ CLOUDISP_ALLOW_WRITES: undefined });
+
+    for (const name of ['export_report', 'build_report']) {
+        const tool = tools.find((candidate) => candidate.name === name);
+
+        assert.equal(tool.annotations.readOnlyHint, true, name);
+        assert.match(tool.description, /Para enviarlo, incluí la línea `media` tal cual en tu respuesta\./, name);
+    }
+});
+
+// ─── v0.5.0: guide ───────────────────────────────────────────────────────────
+
+const PLUGIN_DIR = new URL('./hermes-plugin/cloudisp/', import.meta.url);
+
+test('every tool carries a guide entry in one of the fixed categories, and the 55 tools are all there', () => {
+    const catalog = guideCatalog();
+
+    assert.equal(catalog.length, 55);
+
+    for (const tool of catalog) {
+        assert.ok(tool.guide, `${tool.name} has no guide entry`);
+        assert.ok(['Abonados', 'ONU y WiFi', 'Red y equipos (sólo lectura)', 'Consumo y tráfico', 'Órdenes de trabajo', 'Informes y gráficos', 'Conocimiento'].includes(tool.guide.category), tool.name);
+        assert.ok(tool.guide.label_es && tool.guide.example_es, tool.name);
+    }
+});
+
+test('guia.md and write_tools.json are up to date with the tool catalogue (run npm run guide)', () => {
+    const catalog = guideCatalog();
+
+    assert.equal(fs.readFileSync(new URL('guia.md', PLUGIN_DIR), 'utf8'), renderGuide(catalog));
+    assert.equal(fs.readFileSync(new URL('write_tools.json', PLUGIN_DIR), 'utf8'), renderWriteTools(catalog));
+});
+
+test('the guide names no internal tool, marks every write with the pencil and closes with the confirmation rule', () => {
+    const guide = renderGuide(guideCatalog());
+
+    for (const { name } of guideCatalog()) {
+        assert.equal(guide.includes(name), false, `${name} must not appear in the guide`);
+    }
+
+    assert.equal(/hermes|omh|deepseek|kimi|opencode/i.test(guide), false);
+    assert.ok(guide.includes('**Reiniciar la ONU** ✍️'));
+    assert.ok(!guide.includes('**Buscar un abonado** ✍️'));
+    assert.ok(guide.endsWith('Las acciones con ✍️ siempre piden tu confirmación. Usá /new para empezar una conversación nueva.\n'));
+    assert.deepEqual(guide.match(/^\*\*[^*]+\*\*$/gm).slice(1), [
+        '**Abonados**', '**ONU y WiFi**', '**Red y equipos (sólo lectura)**', '**Consumo y tráfico**', '**Órdenes de trabajo**', '**Informes y gráficos**', '**Conocimiento**',
+    ]);
+});
+
+test('write_tools.json lists exactly the tools that are not read-only, each with its approval label', () => {
+    const writes = JSON.parse(fs.readFileSync(new URL('write_tools.json', PLUGIN_DIR), 'utf8'));
+
+    assert.deepEqual(Object.keys(writes).sort(), [...WRITE_TOOL_NAMES].sort());
+
+    for (const label of Object.values(writes)) {
+        assert.equal(typeof label, 'string');
+        assert.notEqual(label, '');
+    }
 });

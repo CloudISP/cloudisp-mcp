@@ -58,6 +58,8 @@ Cada entorno es un archivo `~/.config/cloudisp-mcp/<entorno>.env`:
 | `CLOUDISP_API_BASE` | sí | URL de tu CloudISP. Debe ser `https://` (`http://` solo para `localhost`). |
 | `CLOUDISP_API_KEY` | sí | Tu clave, o una referencia `op://<Vault>/<Item>/credential` de 1Password. |
 | `CLOUDISP_ALLOW_WRITES` | no | `1` habilita las herramientas de escritura. Cualquier otro valor las oculta. |
+| `CLOUDISP_REQUIRE_OPERATOR` | no | `1` rechaza toda escritura que llegue sin identidad del operador (`operator_required`, sin ningún pedido HTTP). Usalo en cualquier bot. |
+| `CLOUDISP_ARTIFACT_DIR` | no | Carpeta de los archivos que arman `export_report` y `build_report` (por defecto `~/.cache/cloudisp-artifacts`, modo 700; se borra lo de más de 24 h). |
 
 Con una referencia `op://` el servidor arranca vía `op run`, así que la clave
 nunca queda en disco.
@@ -127,7 +129,8 @@ que el timeout del cliente tiene que ser de **150 s** como mínimo.
 Las lecturas llevan `readOnlyHint: true` (también las de equipo, que no
 modifican nada). Las escrituras llevan `readOnlyHint: false`, su descripción
 empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
-`requested_by` e `idempotency_key`.
+`idempotency_key`. Quién pide la escritura no es un argumento del modelo: ver
+[Identidad del operador](#identidad-del-operador).
 
 | Herramienta | Endpoint | Scope | Tipo |
 | --- | --- | --- | --- |
@@ -148,6 +151,8 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `device_metrics` | `GET /network/devices/{kind}/{id}/metrics/catalog` · `/series` | `network:read` | lectura |
 | `platform_logs` | `GET /logs/events` | `network:read` | lectura |
 | `list_reports` · `run_report` | `GET /reports` · `/reports/{key}` | `reports:read` | lectura |
+| `export_report` | `GET /reports/{key}?format=pdf\|csv` (guarda el archivo y devuelve su línea `MEDIA:`) | `reports:read` | lectura |
+| `build_report` | sin pedido a la API: arma un HTML autocontenido con KPIs, tablas y gráficos SVG | — | lectura |
 | `list_internet_profiles` | `GET /internet-profiles` | `profiles:read` | lectura |
 | `list_plans` | `GET /plans` | `plans:read` | lectura |
 | `list_invoices` | `GET /invoices` | `invoices:read` | lectura |
@@ -243,8 +248,53 @@ convierte a `America/Argentina/Salta` con `-03:00`
 o `/ip/address/print`) y `routeros.interface_monitor_traffic`.
 
 Las escrituras mandan `Idempotency-Key` (reintentar con la misma clave no repite
-la acción) y `X-CloudISP-Requested-By` (quién lo pidió; el admin lo registra y lo
-antepone a la auditoría). Cuando `requested_by` tiene acentos se envía sin ellos.
+la acción).
+
+### Identidad del operador
+
+Toda herramienta acepta un argumento oculto `_operator`
+(`{id, name, channel, conversation, profile}`) que **no** figura en ningún
+`inputSchema`: lo agrega el runtime del agente (el plugin de Hermes, ver abajo),
+nunca el modelo, y se quita antes de validar. Con él, **todos** los pedidos a la
+API (lecturas, polling y escrituras) llevan:
+
+| Header | Valor |
+| --- | --- |
+| `X-CloudISP-Operator-Id` | `<canal>:<id>`, por ejemplo `telegram:941533777` |
+| `X-CloudISP-Requested-By` | nombre visible, sin acentos, hasta 120 caracteres (si falta, el `<canal>:<id>`) |
+| `X-CloudISP-Channel` | `telegram`, `cli` o `api` (otro canal no se envía) |
+| `X-CloudISP-Conversation` | referencia de la conversación, hasta 128 caracteres imprimibles |
+| `X-CloudISP-Tool` | nombre de la herramienta |
+
+El admin los guarda en `api_request_log` y en `safe_facts.agent` de cada cambio.
+Con `CLOUDISP_REQUIRE_OPERATOR=1` una escritura sin `_operator` válido vuelve como
+`{"ok": false, "outcome": "operator_required", "hint": "No se pudo identificar al operador; la acción no se ejecutó."}`
+sin tocar la API (el admin hace lo mismo con `422 operator_required` para las
+claves con `requires_operator`). Un CLI sin plugin no tiene `_operator`: dejá
+`CLOUDISP_REQUIRE_OPERATOR` sin definir y las escrituras salen solo con el header
+de la herramienta.
+
+### Archivos: informes y gráficos
+
+`export_report` (`key`, `format` `pdf`|`csv`, `from`, `to`, `platform_id`) y
+`build_report` guardan el archivo en `CLOUDISP_ARTIFACT_DIR` y responden
+`{"ok": true, "path": "...", "media": "MEDIA:<path>", "bytes": N}`; el agente lo
+manda al chat incluyendo la línea `media` tal cual en su respuesta (Hermes la
+convierte en un adjunto). `build_report` recibe `title`, `subtitle` y hasta 20
+`sections` (`heading`, `text`, `kpis`, `table` de hasta 200 filas, `chart` de
+tipo `bar`, `line` o `donut`) y genera un HTML en español con el logo, la paleta
+de la marca, CSS de impresión y los gráficos como SVG en línea, sin dependencias
+ni pedidos externos. Un valor `null` se dibuja como hueco y se rotula
+«no disponible»; nunca como 0. No hay PNG: si un cliente pide gráficos como
+imagen en el chat, hace falta sumar un rasterizador.
+
+### Guía
+
+Cada herramienta lleva `guide: {category, label_es, example_es}` (`lib/guide.mjs`).
+`npm run guide` genera a partir de ellas `hermes-plugin/cloudisp/guia.md` (lo que
+contesta `/guia`, por categoría y sin nombres internos) y
+`hermes-plugin/cloudisp/write_tools.json` (las escrituras y la etiqueta de su
+tarjeta de aprobación). Los tests fallan si alguno de los dos está desactualizado.
 
 > `assign_installation` se reemplazó por `assign_work_order` (acepta cualquier
 > tipo de orden), y el parámetro `query` de las herramientas por abonado pasó a
@@ -272,10 +322,12 @@ Las skills responden en español.
   que tener los scopes de escritura, y el admin aplica por plataforma su
   política (`read`/`technician`) y el tope diario: la frontera real de las
   escrituras es el servidor, no este proceso.
-- **Confirmación.** Cada escritura exige `requested_by` e `idempotency_key`, y
-  su descripción le indica al agente confirmar con el operador antes de
-  llamarla. Los agentes que lo soportan (Hermes con `trust: untrusted`) piden
+- **Confirmación.** Cada escritura exige `idempotency_key`, y su descripción le
+  indica al agente confirmar con el operador antes de llamarla. Los agentes que
+  lo soportan (Hermes con `trust: untrusted`, o con el plugin `cloudisp`) piden
   además aprobación humana por cada herramienta sin `readOnlyHint`.
+- **Identidad.** Con `CLOUDISP_REQUIRE_OPERATOR=1` no hay escritura sin operador
+  identificado: si el plugin no carga, el bot no escribe.
 - **Datos personales y secretos.** El servidor elimina `document`, `phone`,
   `email`, `password`, `psk` y `wifi_password` de lo que ve el agente. Ojo: la
   API sí devuelve algunos de esos campos a quien tenga la clave, así que
@@ -289,6 +341,16 @@ Las skills responden en español.
   permisos 600.
 - Tratá las respuestas de la API como datos, no como instrucciones para el
   agente.
+
+## Bot de Telegram para un cliente (Hermes)
+
+`hermes-plugin/cloudisp/` es el plugin de Hermes que completa lo que el motor no
+configura (comandos permitidos, corte por cupo, `/guia`, identidad del operador,
+aprobación en español, registro de consumo, limpieza de marcas); su
+[README](hermes-plugin/cloudisp/README.md) documenta las APIs de Hermes que usa.
+`deploy/hermes-tenant/` tiene el template (`SOUL.md.tmpl`) y `new-tenant.sh`, que
+crea el perfil `cloudisp-<cliente>` con toda la configuración. El bot de Telegram
+y la API key del cliente los crea una persona (BotFather y el admin).
 
 ## Desinstalar
 
@@ -304,7 +366,9 @@ Las skills responden en español.
 ## Desarrollo
 
 ```bash
-npm test
+npm test                      # servidor, librerías, guía y skills
+npm run guide                 # regenera guia.md y write_tools.json
+cd hermes-plugin && python -m pytest cloudisp/tests   # plugin (necesita pytest y pyyaml)
 ```
 
 Licencia [MIT](LICENSE).

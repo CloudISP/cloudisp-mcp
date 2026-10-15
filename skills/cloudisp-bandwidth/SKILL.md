@@ -26,7 +26,7 @@ en orden; no saltees la confirmación.
 3. **Confirmar** — resumen con `id` + nombre del abonado, plataforma y el
    cambio de → a (plan o Mbps), con los botones `✅ Confirmar` / `❌ Cancelar`.
 4. **Escribir** — `subscriber_id` (o el `subscriber_query` confirmado),
-   `requested_by` e `idempotency_key` =
+   e `idempotency_key` =
    `agent-<yyyymmddhhmmss>-bandwidth-<subscriber_id>` con la hora local actual.
    Si reintentás, reusá la misma clave.
 5. **Informar** —

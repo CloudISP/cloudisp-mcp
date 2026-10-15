@@ -14,8 +14,12 @@
 
 import { pathToFileURL } from 'node:url';
 
+import { fileStamp, saveArtifact } from './lib/artifacts.mjs';
+import { GUIDE } from './lib/guide.mjs';
+import { normalizeReport, renderReportHtml, ReportInputError, slugify } from './lib/report-html.mjs';
+
 const SERVER_NAME = 'cloudisp-mcp';
-const SERVER_VERSION = '0.4.0';
+const SERVER_VERSION = '0.5.0';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const API_PREFIX = '/api/v1/public';
 const REQUEST_TIMEOUT_MS = 30000;
@@ -30,9 +34,20 @@ const LONG_TASK_TIMEOUT_MS = 110000;
 /** Longest `get_task` wait, in seconds (the same budget). */
 const MAX_TASK_WAIT_SECONDS = 110;
 
-/** Header carrying who asked for a write; the API logs it and stamps it on audit text. */
+/**
+ * Headers carried by every API request: who asked (the agent runtime's hidden `_operator` argument)
+ * and which tool. The API logs them and stamps them on the audit trail of every write.
+ */
+const OPERATOR_HEADER = 'X-CloudISP-Operator-Id';
 const REQUESTED_BY_HEADER = 'X-CloudISP-Requested-By';
+const CHANNEL_HEADER = 'X-CloudISP-Channel';
+const CONVERSATION_HEADER = 'X-CloudISP-Conversation';
+const TOOL_HEADER = 'X-CloudISP-Tool';
 const REQUESTED_BY_MAX_LENGTH = 120;
+const CONVERSATION_MAX_LENGTH = 128;
+
+/** Channels the API accepts in `X-CloudISP-Channel`. */
+const OPERATOR_CHANNELS = ['telegram', 'cli', 'api'];
 
 /** Description prefix of every write tool. */
 const WRITE_PREFIX = 'ESCRITURA (requiere confirmación del operador): ';
@@ -42,7 +57,7 @@ const INSTRUCTIONS = [
     'Llamá cloudisp_context al iniciar cada conversación y antes de delegar; obedecé sus reglas y artículos.',
     'Nunca adivines ids: resolvé al abonado con búsqueda y, si hay más de uno, preguntá mostrando candidatos. Dato faltante = "no disponible", nunca 0. Las horas ya vienen en hora de Salta (-03:00): no las conviertas.',
     'Toda escritura: resumen (abonado, id, plataforma, ONU, acción, impacto) y confirmación explícita del operador antes de llamar la tool; una acción por confirmación, nunca encadenes escrituras.',
-    'Pasá siempre requested_by con el nombre de quien pidió y una idempotency_key nueva por acción (reusala solo para reintentar la misma).',
+    'Cada acción queda registrada a nombre de quien la pidió: no pidas ni inventes nombres. Pasá una idempotency_key nueva por acción (reusala solo para reintentar la misma).',
     'Nunca muestres contraseñas, PSK, documentos ni teléfonos. No podés crear, editar ni borrar OLTs, routers, masters, plataformas ni perfiles. Subagentes: solo lecturas.',
     'Si una tool devuelve platform_policy_denied, actor_forbidden o daily_write_limit_reached, informalo y no reintentes. Las escrituras requieren CLOUDISP_ALLOW_WRITES=1.',
 ].join('\n');
@@ -152,7 +167,7 @@ function apiFailurePayload(response) {
  * @param {Function} fetchImpl `fetch`-compatible implementation.
  * @param {string} method HTTP method.
  * @param {string} path Path below `/api/v1/public`.
- * @param {{ query?: object, body?: object, idempotencyKey?: string }} [options] Optional query string, JSON body and idempotency header.
+ * @param {{ query?: object, body?: object, idempotencyKey?: string, binary?: boolean }} [options] Optional query string, JSON body, idempotency header and, with `binary`, a file answer (`bytes` and `contentType` instead of a JSON body).
  * @return {Promise<{ ok: boolean, status: number, body: unknown }>} Normalized response.
  */
 async function apiRequest(fetchImpl, method, path, options = {}) {
@@ -167,7 +182,7 @@ async function apiRequest(fetchImpl, method, path, options = {}) {
         }
     }
 
-    const headers = { Authorization: `Bearer ${config.key}`, Accept: 'application/json' };
+    const headers = { Authorization: `Bearer ${config.key}`, Accept: options.binary ? 'application/pdf, text/csv, application/json' : 'application/json' };
     const init = { method, headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
 
     if (options.body !== undefined) {
@@ -180,6 +195,16 @@ async function apiRequest(fetchImpl, method, path, options = {}) {
     }
 
     const response = await fetchImpl(url.toString(), init);
+    const status = Number.isInteger(response.status) ? response.status : 200;
+    const ok = typeof response.ok === 'boolean' ? response.ok : status >= 200 && status < 300;
+
+    if (options.binary && ok) {
+        const contentType = String(response.headers?.get?.('content-type') ?? '').toLowerCase();
+
+        if (!contentType.includes('json')) {
+            return { ok, status, body: null, bytes: Buffer.from(await response.arrayBuffer()), contentType };
+        }
+    }
 
     let body = null;
     try {
@@ -187,9 +212,6 @@ async function apiRequest(fetchImpl, method, path, options = {}) {
     } catch {
         body = null;
     }
-
-    const status = Number.isInteger(response.status) ? response.status : 200;
-    const ok = typeof response.ok === 'boolean' ? response.ok : status >= 200 && status < 300;
 
     return { ok, status, body };
 }
@@ -283,31 +305,73 @@ function requireIdempotencyKey(args) {
 }
 
 /**
- * Require the `requested_by` argument: who asked for the change, 1 to 120 characters.
- *
- * @param {object} args Tool arguments.
- * @return {string} The value as an ASCII-only header (accents folded), so it reaches the audit trail unmangled.
+ * @param {unknown} value Free text.
+ * @return {string} ASCII-only header text: accents folded, anything else collapsed to a space.
  */
-function requireRequestedBy(args) {
-    const value = asTrimmedString(args.requested_by);
-    const header = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7e]+/g, ' ').trim();
-
-    if (value.length > REQUESTED_BY_MAX_LENGTH || header === '') {
-        fail(invalid('requested_by is required: the name of the person who asked for the change (1 to 120 characters).'));
-    }
-
-    return header;
+function asciiHeader(value) {
+    return asTrimmedString(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7e]+/g, ' ').trim();
 }
 
 /**
- * Wrap `fetch` so every request of a write tool, lookups included, carries who asked for it.
+ * Read the hidden `_operator` argument the agent runtime adds to every call: who asked.
+ *
+ * @param {unknown} raw `{ id, name, channel, conversation, profile }`.
+ * @return {{ ref: string, name: string, channel: string, conversation: string }|null} The operator, or null when the
+ *     identity is missing or malformed (`<channel>:<id>` must match what the API accepts).
+ */
+function readOperator(raw) {
+    if (!isPlainObject(raw)) {
+        return null;
+    }
+
+    const channel = asTrimmedString(raw.channel).toLowerCase();
+    const id = typeof raw.id === 'number' ? String(raw.id) : asTrimmedString(raw.id);
+
+    if (!/^[a-z]{2,16}$/.test(channel) || !/^[A-Za-z0-9._-]{1,40}$/.test(id)) {
+        return null;
+    }
+
+    return {
+        ref: `${channel}:${id}`,
+        name: asciiHeader(raw.name).slice(0, REQUESTED_BY_MAX_LENGTH).trim(),
+        channel,
+        conversation: asciiHeader(raw.conversation).slice(0, CONVERSATION_MAX_LENGTH).trim(),
+    };
+}
+
+/**
+ * @param {string} tool Tool name.
+ * @param {{ ref: string, name: string, channel: string, conversation: string }|null} operator Who asked, if known.
+ * @return {Record<string, string>} Identity headers of the tool call.
+ */
+function identityHeaders(tool, operator) {
+    const headers = { [TOOL_HEADER]: tool };
+
+    if (operator !== null) {
+        headers[OPERATOR_HEADER] = operator.ref;
+        headers[REQUESTED_BY_HEADER] = operator.name || operator.ref;
+
+        if (OPERATOR_CHANNELS.includes(operator.channel)) {
+            headers[CHANNEL_HEADER] = operator.channel;
+        }
+
+        if (operator.conversation !== '') {
+            headers[CONVERSATION_HEADER] = operator.conversation;
+        }
+    }
+
+    return headers;
+}
+
+/**
+ * Wrap `fetch` so every request of a tool call, lookups and polling included, carries the identity headers.
  *
  * @param {Function} fetchImpl `fetch`-compatible implementation.
- * @param {string} requestedBy Header-safe requester name.
+ * @param {Record<string, string>} extra Headers to add.
  * @return {Function} `fetch`-compatible implementation.
  */
-function withRequestedBy(fetchImpl, requestedBy) {
-    return (url, init) => fetchImpl(url, { ...init, headers: { ...init?.headers, [REQUESTED_BY_HEADER]: requestedBy } });
+function withHeaders(fetchImpl, extra) {
+    return (url, init) => fetchImpl(url, { ...init, headers: { ...init?.headers, ...extra } });
 }
 
 /**
@@ -1164,6 +1228,84 @@ async function runReport(args, fetchImpl) {
     return call(fetchImpl, 'GET', `/reports/${key}`, { query });
 }
 
+/** Formats `export_report` can ask the API for, with the content type each must come back as. */
+const REPORT_FORMATS = { pdf: 'application/pdf', csv: 'text/csv' };
+
+/**
+ * `export_report` — `GET /reports/{key}?format=pdf|csv`: save the file and hand back its `MEDIA:` line.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {object} _clock Clock seams (unused).
+ * @param {Record<string, string|undefined>} env Environment bag (artifact directory).
+ * @return {Promise<object>} `{ ok, path, media, bytes }`, or a failure payload.
+ */
+async function exportReport(args, fetchImpl, _clock, env) {
+    const key = asTrimmedString(args.key);
+    const format = asTrimmedString(args.format).toLowerCase();
+
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(key)) {
+        fail(invalid('key is required: a report key from list_reports.'));
+    }
+
+    if (!Object.hasOwn(REPORT_FORMATS, format)) {
+        fail(invalid('format is required: pdf or csv.'));
+    }
+
+    const query = { format, platform_id: optInt(args, 'platform_id') };
+
+    for (const name of ['from', 'to']) {
+        if (isPresent(args[name])) {
+            if (typeof args[name] !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(args[name].trim())) {
+                fail(invalid(`${name} must be a date as YYYY-MM-DD.`));
+            }
+
+            query[name] = args[name].trim();
+        }
+    }
+
+    const response = await apiRequest(fetchImpl, 'GET', `/reports/${key}`, { query, binary: true });
+
+    if (isFailure(response)) {
+        fail(apiFailurePayload(response));
+    }
+
+    if (!Buffer.isBuffer(response.bytes) || !response.contentType.includes(REPORT_FORMATS[format])) {
+        fail({ error: 'unexpected_response', message: `The API did not answer a ${format} file for report ${key}.` });
+    }
+
+    const { path, bytes } = saveArtifact(env, `reporte-${key}-${fileStamp()}.${format}`, response.bytes);
+
+    return { ok: true, path, media: `MEDIA:${path}`, bytes };
+}
+
+/**
+ * `build_report` — render a self-contained HTML report (KPIs, tables, SVG charts) from the agent's own data; no API call.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} _fetchImpl `fetch`-compatible implementation (unused).
+ * @param {object} _clock Clock seams (unused).
+ * @param {Record<string, string|undefined>} env Environment bag (artifact directory).
+ * @return {Promise<object>} `{ ok, path, media, bytes }`, or a validation failure.
+ */
+async function buildReport(args, _fetchImpl, _clock, env) {
+    let report;
+
+    try {
+        report = normalizeReport(args);
+    } catch (error) {
+        if (error instanceof ReportInputError) {
+            fail(invalid(error.message));
+        }
+
+        throw error;
+    }
+
+    const { path, bytes } = saveArtifact(env, `informe-${slugify(report.title)}-${fileStamp()}.html`, renderReportHtml(report));
+
+    return { ok: true, path, media: `MEDIA:${path}`, bytes };
+}
+
 /**
  * `get_work_order` — `GET /work-orders/{id}`.
  *
@@ -1862,15 +2004,11 @@ const SUBSCRIBER_PROPERTIES = {
     },
 };
 
-/** Arguments every write tool requires. */
+/** Arguments every write tool requires. The operator is not one of them: the agent runtime injects it as the hidden `_operator`. */
 const WRITE_PROPERTIES = {
     idempotency_key: {
         type: 'string',
         description: 'Replay token (^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$), reused verbatim as the Idempotency-Key header. A new value per action; reuse it only to retry the same action.',
-    },
-    requested_by: {
-        type: 'string',
-        description: 'Name of the person who asked for this change (1 to 120 characters). Sent as X-CloudISP-Requested-By and stamped on the audit trail.',
     },
 };
 
@@ -1900,7 +2038,7 @@ function readTool(name, title, description, properties, handler, required = []) 
 }
 
 /**
- * Declare a write tool: hidden without `CLOUDISP_ALLOW_WRITES=1`, `requested_by` and `idempotency_key` required.
+ * Declare a write tool: hidden without `CLOUDISP_ALLOW_WRITES=1`, `idempotency_key` required.
  *
  * @param {string} name Tool name.
  * @param {string} title Spanish title.
@@ -1921,7 +2059,7 @@ function writeTool(name, title, description, properties, required, handler, dest
         inputSchema: {
             type: 'object',
             properties: { ...WRITE_PROPERTIES, ...properties },
-            required: ['idempotency_key', 'requested_by', ...required],
+            required: ['idempotency_key', ...required],
         },
         handler,
     };
@@ -2138,6 +2276,88 @@ const TOOLS = [
         },
         runReport,
         ['key'],
+    ),
+    readTool(
+        'export_report',
+        'Exportar reporte',
+        'Export one report from list_reports as a PDF or CSV file (GET /reports/{key}?format=). The file is saved locally and the answer is {ok, path, media, bytes}. '
+        + 'Para enviarlo, incluí la línea `media` tal cual en tu respuesta.',
+        {
+            key: { type: 'string', description: 'Report key from list_reports.' },
+            format: { type: 'string', enum: ['pdf', 'csv'], description: 'File format.' },
+            from: { type: 'string', description: 'Start date, YYYY-MM-DD (reports that declare a date range).' },
+            to: { type: 'string', description: 'End date, YYYY-MM-DD.' },
+            platform_id: { type: 'integer', description: 'Restrict the report to one visible platform.' },
+        },
+        exportReport,
+        ['key', 'format'],
+    ),
+    readTool(
+        'build_report',
+        'Armar informe con gráficos',
+        'Build a self-contained HTML report in Spanish from data you already read: title, sections with text, KPIs, a table (at most 200 rows) and a bar, line or donut chart. '
+        + 'Pass identifiers (subscriber numbers, MAC) as text so they are not formatted as numbers; a null value is drawn as a gap and labelled "no disponible", never as 0. '
+        + 'The file is saved locally and the answer is {ok, path, media, bytes}. Para enviarlo, incluí la línea `media` tal cual en tu respuesta.',
+        {
+            title: { type: 'string', description: 'Report title (at most 200 characters).' },
+            subtitle: { type: 'string', description: 'Optional subtitle, e.g. the period or the scope.' },
+            sections: {
+                type: 'array',
+                description: 'Report sections, in order (1 to 20).',
+                items: {
+                    type: 'object',
+                    properties: {
+                        heading: { type: 'string', description: 'Section heading.' },
+                        text: { type: 'string', description: 'Plain text; a blank line starts a new paragraph.' },
+                        kpis: {
+                            type: 'array',
+                            description: 'Headline figures (at most 12).',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    label: { type: 'string' },
+                                    value: { type: ['string', 'number', 'null'], description: 'Figure; null renders as "no disponible".' },
+                                },
+                                required: ['label', 'value'],
+                            },
+                        },
+                        table: {
+                            type: 'object',
+                            description: 'A table: columns (at most 12) and rows (at most 200), each row with one cell per column.',
+                            properties: {
+                                columns: { type: 'array', items: { type: 'string' } },
+                                rows: { type: 'array', items: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } } },
+                            },
+                            required: ['columns', 'rows'],
+                        },
+                        chart: {
+                            type: 'object',
+                            description: 'A chart: one value per category in every series (null = missing). A donut takes exactly one series of non-negative values.',
+                            properties: {
+                                type: { type: 'string', enum: ['bar', 'line', 'donut'] },
+                                categories: { type: 'array', items: { type: 'string' } },
+                                series: {
+                                    type: 'array',
+                                    items: {
+                                        type: 'object',
+                                        properties: {
+                                            name: { type: 'string' },
+                                            data: { type: 'array', items: { type: ['number', 'null'] } },
+                                        },
+                                        required: ['name', 'data'],
+                                    },
+                                },
+                                unit: { type: 'string', description: 'Unit shown next to the values, e.g. GB or %.' },
+                            },
+                            required: ['type', 'categories', 'series'],
+                        },
+                    },
+                    required: ['heading'],
+                },
+            },
+        },
+        buildReport,
+        ['title', 'sections'],
     ),
     readTool(
         'list_internet_profiles',
@@ -2547,6 +2767,20 @@ const TOOLS = [
     ),
 ];
 
+// Every tool carries its user-facing catalogue entry (see lib/guide.mjs); the tests fail when one is missing.
+for (const tool of TOOLS) {
+    tool.guide = GUIDE[tool.name];
+}
+
+/**
+ * The tools with their guide entry, for `npm run guide` and the tests.
+ *
+ * @return {Array<{ name: string, write: boolean, guide: object|undefined }>}
+ */
+export function guideCatalog() {
+    return TOOLS.map(({ name, write, guide }) => ({ name, write: write === true, guide }));
+}
+
 /** Tools that change state; hidden and refused unless `CLOUDISP_ALLOW_WRITES=1`. */
 const WRITE_TOOLS = TOOLS.filter((tool) => tool.write).map((tool) => tool.name);
 
@@ -2659,6 +2893,7 @@ const OUTCOME_HINTS = {
     not_found: 'Dato no disponible: decilo así.',
     task_not_found: 'Dato no disponible: decilo así.',
     source_unavailable: 'Dato no disponible: decilo así.',
+    operator_required: 'No se pudo identificar al operador; la acción no se ejecutó.',
     validation_failed: 'Argumentos inválidos: corregilos o preguntale al usuario; no repitas la misma llamada.',
     wifi_read_pending: 'La lectura no terminó y no se escribió nada; consultá get_task más tarde.',
     task_failed: 'La tarea falló en el equipo: informá el motivo y ofrecé la alternativa (reinicio u OT); no reintentes solo.',
@@ -2806,10 +3041,16 @@ async function dispatchRaw(name, args, fetchImpl, env, clock) {
         return invalid('arguments must be an object.');
     }
 
-    try {
-        const http = tool.write ? withRequestedBy(fetchImpl, requireRequestedBy(args)) : fetchImpl;
+    // `_operator` is not in any inputSchema: the agent runtime adds it, and it never reaches the handler.
+    const { _operator: rawOperator, ...toolArgs } = args;
+    const operator = readOperator(rawOperator);
 
-        return await tool.handler(args, http, clock);
+    if (tool.write && env?.CLOUDISP_REQUIRE_OPERATOR === '1' && operator === null) {
+        return { error: 'operator_required', message: 'The operator could not be identified (hidden _operator argument missing or malformed); nothing was sent to the API.' };
+    }
+
+    try {
+        return await tool.handler(toolArgs, withHeaders(fetchImpl, identityHeaders(name, operator)), clock, env);
     } catch (error) {
         if (error instanceof ToolError) {
             return error.payload;

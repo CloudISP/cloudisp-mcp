@@ -8,7 +8,7 @@ compatibility: Requiere el servidor MCP cloudisp (https://github.com/CloudISP/cl
 # Órdenes de trabajo
 
 Respondé en **español**. Aplicá las reglas de `cloudisp-operator`: toda
-escritura lleva resumen, confirmación con botones, `requested_by` e
+escritura lleva resumen, confirmación con botones e
 `idempotency_key`.
 
 ## Consultar (solo lectura)
@@ -30,7 +30,7 @@ escritura lleva resumen, confirmación con botones, `requested_by` e
    y `priority` son opcionales.
 3. **Confirmá** (abonado + id, plataforma, tipo, título, descripción) con los
    botones `✅ Confirmar` / `❌ Cancelar`.
-4. Llamá `create_work_order` con `subscriber_id`, `type`, `title`, `requested_by` e
+4. Llamá `create_work_order` con `subscriber_id`, `type`, `title` e
    `idempotency_key` (`agent-<yyyymmddhhmmss>-ot-<subscriber_id>`; también
    queda como referencia externa de la OT, máx. 100 caracteres).
 5. Informá el `id` de la OT. `replayed: true` → **"ya estaba creada"**.

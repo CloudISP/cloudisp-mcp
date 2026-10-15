@@ -1,0 +1,13 @@
+name: cloudisp
+kind: standalone
+version: "0.5.0"
+requires_hermes: ">=0.22"
+description: "Capa comercial del Asistente CloudISP: comandos permitidos, corte por cupo de uso, /guia, identidad del operador en cada llamada al MCP, aprobación humana de toda escritura, registro de consumo y limpieza de marcas."
+author: CloudISP
+provides_hooks:
+  - pre_gateway_dispatch
+  - pre_tool_call
+  - subagent_start
+  - post_api_request
+  - post_auxiliary_call
+  - transform_llm_output

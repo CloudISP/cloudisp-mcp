@@ -21,7 +21,7 @@ una sola por vez.
    servicio" y si se abrirá una orden de trabajo. Botones `✅ Confirmar` /
    `❌ Cancelar`.
 4. **Escribir** — `disconnect_subscriber` con `subscriber_id` (o el
-   `subscriber_query` confirmado), `scope`, `requested_by`, `idempotency_key` =
+   `subscriber_query` confirmado), `scope`, `idempotency_key` =
    `agent-<yyyymmddhhmmss>-disconnect-<subscriber_id>` con la hora local actual,
    y `open_work_order: true` **solo** si el operador pidió una orden (servicio
    técnico = `work_order_type: "technical_service"`).
