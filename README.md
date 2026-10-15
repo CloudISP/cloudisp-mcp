@@ -87,7 +87,7 @@ codex mcp add cloudisp -- ~/.local/share/cloudisp-mcp/bin/cloudisp-mcp prod
 **omp** — `~/.omp/agent/mcp.json`
 
 ```json
-{ "mcpServers": { "cloudisp": { "type": "stdio", "command": "/home/vos/.local/share/cloudisp-mcp/bin/cloudisp-mcp", "args": ["prod"], "enabled": true, "timeout": 120000 } } }
+{ "mcpServers": { "cloudisp": { "type": "stdio", "command": "/home/vos/.local/share/cloudisp-mcp/bin/cloudisp-mcp", "args": ["prod"], "enabled": true, "timeout": 150000 } } }
 ```
 
 **pi** — requiere el adaptador MCP (`pi install npm:pi-mcp-adapter`); `~/.pi/agent/mcp.json`
@@ -99,7 +99,7 @@ codex mcp add cloudisp -- ~/.local/share/cloudisp-mcp/bin/cloudisp-mcp prod
 **opencode** — `~/.config/opencode/opencode.json`
 
 ```json
-{ "mcp": { "cloudisp": { "type": "local", "command": ["/home/vos/.local/share/cloudisp-mcp/bin/cloudisp-mcp", "prod"], "enabled": true, "timeout": 120000 } } }
+{ "mcp": { "cloudisp": { "type": "local", "command": ["/home/vos/.local/share/cloudisp-mcp/bin/cloudisp-mcp", "prod"], "enabled": true, "timeout": 150000 } } }
 ```
 
 Skills: enlazá cada carpeta de `skills/` en `~/.claude/skills` (Claude Code),
@@ -114,12 +114,13 @@ mcp_servers:
     command: /home/hermes/.local/share/cloudisp-mcp/bin/cloudisp-mcp
     args: [prod]
     trust: untrusted
-    timeout: 120
+    timeout: 150
 ```
 
-Las herramientas de equipo esperan hasta 40 s por el resultado (el cambio de
-WiFi hace una lectura y una escritura: hasta ~85 s), así que el timeout del
-cliente tiene que ser de **120 s** como mínimo.
+Las herramientas de equipo esperan hasta 40 s por el resultado (110 s el reinicio,
+la sincronización, el reaprovisionamiento, el cambio de ONU y el restablecimiento
+de fábrica; el cambio de WiFi hace una lectura y una escritura: hasta ~85 s), así
+que el timeout del cliente tiene que ser de **150 s** como mínimo.
 
 ## Herramientas
 
@@ -135,10 +136,10 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `find_subscriber` | `GET /subscribers?q=` | `subscribers:read` | lectura |
 | `get_subscriber` | `GET /subscribers/{id}` | `subscribers:read` | lectura |
 | `diagnose_subscriber` | `GET /subscribers/{id}/diagnosis` | `subscribers:read` | lectura |
-| `onu_read` | `POST /subscribers/{id}/onu/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
+| `onu_read` | `POST /subscribers/{id}/onu/reads` + `GET /tasks/{id}` (incluye `onu.wifi_password_check`) | `devices:read` | lectura |
 | `onu_diagnose` | `POST /subscribers/{id}/onu/diagnose` + `GET /tasks/{id}` | `devices:read` | lectura |
-| `get_task` | `GET /tasks/{id}` | `devices:read` | lectura |
-| `list_onus` | `GET /network/onus` | `network:read` | lectura |
+| `get_task` | `GET /tasks/{id}` (`wait_seconds` espera a que termine) | `devices:read` | lectura |
+| `list_onus` | `GET /network/onus` (modelo, firmware, plataforma, solo offline) | `network:read` | lectura |
 | `list_olts` · `get_olt` | `GET /network/olts` · `/network/olts/{id}` | `network:read` | lectura |
 | `olt_read` | `POST /network/olts/{id}/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
 | `list_routers` | `GET /network/routers` | `network:read` | lectura |
@@ -152,7 +153,15 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `list_invoices` | `GET /invoices` | `invoices:read` | lectura |
 | `find_work_orders` · `get_work_order` | `GET /work-orders` · `/work-orders/{id}` | `work-orders:read` | lectura |
 | `find_technician` | `GET /employees?q=` | `employees:read` | lectura |
-| `network_snapshot` | `GET /operations/snapshot` | `operations:read` | lectura |
+| `network_snapshot` | `GET /operations/snapshot` (`platform_id` opcional) | `operations:read` | lectura |
+| `list_onu_models` | `GET /network/onu-models` | `network:read` | lectura |
+| `subscriber_usage` | `GET /subscribers/{id}/usage` | `subscribers:read` | lectura |
+| `usage_ranking` | `GET /network/usage/ranking` | `network:read` | lectura |
+| `device_tasks` | `GET /network/devices/{kind}/{id}/tasks` · `/subscribers/{id}/tasks` | `network:read` · `subscribers:read` | lectura |
+| `get_router` | `GET /network/routers/{id}` | `network:read` | lectura |
+| `olt_poll_runs` | `GET /network/olts/{id}/poll-runs` | `network:read` | lectura |
+| `list_eoc_masters` | `GET /network/eoc-masters` | `network:read` | lectura |
+| `live_traffic` | `POST /subscribers/{id}/live-traffic` | `devices:read` | lectura |
 | `reboot_onu` | `POST /subscribers/{id}/onu/actions` (`onu.reboot`) | `devices:operate` | escritura |
 | `set_onu_catv` | `POST /subscribers/{id}/onu/actions` (`onu.catv_update`) | `devices:operate` | escritura |
 | `change_subscriber_wifi` | `onu.wifi_read` + `POST /subscribers/{id}/onu/actions` (`onu.wifi_ssid_update`) | `devices:read` + `devices:operate` | escritura |
@@ -164,6 +173,14 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `reconnect_subscriber` | `POST /subscribers/{id}/reconnect` | `subscribers:write` | escritura |
 | `create_work_order` | `POST /work-orders` | `work-orders:write` | escritura |
 | `assign_work_order` | `POST /work-orders/{id}/assign` | `work-orders:assign` | escritura |
+| `set_onu_admin_state` | `POST /subscribers/{id}/onu/actions` (`olt.onu_admin_state`) | `devices:operate` | escritura |
+| `factory_reset_onu` | `POST /subscribers/{id}/onu/actions` (`onu.factory_reset`) | `devices:operate` | escritura, destructiva |
+| `optimize_wifi` | `POST /subscribers/{id}/onu/actions` (`onu.wifi_optimize`, `preview`/`apply`) | `devices:operate` | escritura |
+| `restore_wifi` | `POST /subscribers/{id}/onu/actions` (`onu.wifi_restore`) | `devices:operate` | escritura |
+| `reprovision_onu` | `POST /subscribers/{id}/onu/provision` | `devices:operate` | escritura |
+| `kick_pppoe` | `POST /subscribers/{id}/pppoe/kick` | `subscribers:write` | escritura, destructiva |
+| `locate_new_onu` | `POST /subscribers/{id}/onu/swap/locate` + `GET /tasks/{id}` | `devices:operate` | escritura |
+| `swap_onu` | `POST /subscribers/{id}/onu/swap` | `devices:operate` | escritura |
 
 Todas las herramientas que reciben un abonado aceptan `subscriber_id` o
 `subscriber_query`; con `subscriber_query` se exige **exactamente un** abonado
@@ -171,12 +188,26 @@ Todas las herramientas que reciben un abonado aceptan `subscriber_id` o
 escritura).
 
 Las herramientas de equipo (`onu_read`, `onu_diagnose`, `olt_read`,
-`router_read` y las escrituras de ONU) despachan una tarea y **esperan hasta
-40 s** (consulta cada 2 s) a su resultado, que devuelven con la forma de
-`GET /tasks/{id}`. Si no terminó, responden `{"status":"pending","task_run_id":N}`
-y se la sigue con `get_task`. `change_subscriber_wifi` y `change_wifi_radio`
-primero leen el WiFi (`onu.wifi_read`) y escriben con el `task_run_id` de esa
-lectura (`based_on_task_run_id`); si la lectura falla o no termina, no escriben.
+`router_read` y las escrituras de ONU) despachan una tarea y **esperan** a su
+resultado (consulta cada 2 s), que devuelven con la forma de `GET /tasks/{id}`.
+El presupuesto es de **40 s** para las lecturas y las escrituras rápidas, y de
+**110 s** para `reboot_onu`, `sync_onu`, `reprovision_onu`, `swap_onu` y
+`factory_reset_onu`. Si no terminó, responden `{"status":"pending","task_run_id":N}`
+y se la sigue con `get_task` y `wait_seconds` (0 a 110: espera a que termine en
+vez de pedirle al usuario que vuelva a mirar). `change_subscriber_wifi`,
+`change_wifi_radio` y `onu_read` con `onu.wifi_password_check` primero leen el
+WiFi (`onu.wifi_read`) y usan el `task_run_id` de esa lectura
+(`based_on_task_run_id`); si la lectura falla o no termina, no hacen nada más.
+
+`optimize_wifi` con `mode: "preview"` solo calcula el plan (`result.plan`) y
+**nunca cambia el equipo**; con `mode: "apply"` se le devuelve ese plan sin
+modificar. Va en una herramienta de escritura (pide confirmación y aprobación
+como las demás) aunque la vista previa no escriba nada. `factory_reset_onu`
+exige `confirm: "factory_reset"`. `locate_new_onu` busca la ONU nueva por MAC en
+cada OLT de la plataforma del abonado (una tarea por OLT) y junta los
+resultados en `matches`; su `network_onu_id` y `serial` son los de `swap_onu`.
+`live_traffic` vuelve a pedir la muestra cada 2 s (hasta 5 veces) mientras el
+router arranca la observación, y responde `download_bps` y `upload_bps`.
 
 **Resultados.** Las respuestas esperadas del dominio no son errores de la
 herramienta: un 4xx con código de la API (`validation_failed`, `not_found`,
@@ -194,6 +225,18 @@ de primer nivel (así no abren el breaker de Hermes):
 fallida es `{"ok": false, "outcome": "task_failed", "error_code": "...", "message": "..."}`.
 Siguen siendo errores (`isError: true`, clave `error`) los fallos de transporte,
 timeouts, 401, 5xx distintos de `source_unavailable` y respuestas no JSON.
+
+Una tarea que terminó (`succeeded`) pero cuyo resultado trae `error` (por ejemplo
+`onu_offline`) o `restart_observed: false` **no es un éxito**: vuelve como
+`{"ok": false, "outcome": "device_error", "error": "onu_offline", "task_run_id": N, "details": {…}}`
+(`error` es `restart_not_observed` cuando el equipo nunca volvió del reinicio).
+Sigue sin ser un error de la herramienta (`isError: false`).
+
+**Horas.** La API habla en UTC. Antes de entregarlas al agente, toda cadena que
+sea una fecha (ISO 8601 con zona, o `YYYY-MM-DD HH:MM:SS` sin zona, que es UTC) se
+convierte a `America/Argentina/Salta` con `-03:00`
+(`2026-10-14T13:00:00+00:00` → `2026-10-14T10:00:00-03:00`). Lo que no es una fecha
+(fechas sin hora, seriales, texto) no se toca.
 
 `router_read` solo ejecuta `routeros.health_check`, `routeros.test_command`
 (`command`: `/system/identity/print`, `/system/resource/print`, `/interface/print`
@@ -215,6 +258,7 @@ antepone a la auditoría). Cuando `requested_by` tiene acentos se envía sin ell
 | `cloudisp-diagnostico` | Árbol de diagnóstico "abonado sin internet" (deuda, PPPoE, ONU, PON, router, logs). |
 | `cloudisp-consultas` | Consultas de abonados, perfiles, planes, facturas, órdenes, técnicos, ONUs, OLTs y reportes. |
 | `cloudisp-network-status` | Estado de red, alertas, equipos, métricas y logs. |
+| `cloudisp-red` | Depuración de red de solo lectura: ONUs por modelo/firmware, consumo, OLTs, routers, masters EoC y tareas de equipo. |
 | `cloudisp-bandwidth` | Cambio de plan o de perfil de un abonado. |
 | `cloudisp-disconnect` | Corte y reconexión, con orden de trabajo opcional. |
 | `cloudisp-ordenes-trabajo` | Crear y asignar órdenes de trabajo. |

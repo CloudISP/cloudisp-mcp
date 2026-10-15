@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { PassThrough } from 'node:stream';
 
-import { awaitTask, dispatch, listTools, REDACTED_KEYS, startServer } from './server.mjs';
+import { awaitTask, dispatch, listTools, REDACTED_KEYS, startServer, toDisplayTime } from './server.mjs';
 
 const SERVER_PATH = fileURLToPath(new URL('./server.mjs', import.meta.url));
 const API_BASE = 'https://admin.cloudisp.test';
@@ -52,12 +52,16 @@ const READ_TOOL_NAMES = [
     'list_routers', 'router_read', 'network_alerts', 'device_metrics', 'platform_logs', 'list_reports',
     'run_report', 'list_internet_profiles', 'list_plans', 'list_invoices', 'find_work_orders',
     'get_work_order', 'find_technician', 'network_snapshot',
+    'list_onu_models', 'subscriber_usage', 'usage_ranking', 'device_tasks', 'get_router', 'olt_poll_runs',
+    'list_eoc_masters', 'live_traffic',
 ];
 
 const WRITE_TOOL_NAMES = [
     'reboot_onu', 'set_onu_catv', 'change_subscriber_wifi', 'change_wifi_radio', 'sync_onu',
     'change_subscriber_plan', 'change_subscriber_bandwidth', 'disconnect_subscriber', 'reconnect_subscriber',
     'create_work_order', 'assign_work_order',
+    'set_onu_admin_state', 'factory_reset_onu', 'optimize_wifi', 'restore_wifi', 'reprovision_onu', 'kick_pppoe',
+    'locate_new_onu', 'swap_onu',
 ];
 
 /** Arguments every write tool requires. */
@@ -933,7 +937,7 @@ test('tools/list exposes the full catalogue with writes on and only the reads wi
     assert.deepEqual(reads.map((tool) => tool.name).sort(), [...READ_TOOL_NAMES].sort());
 });
 
-test('annotations: every read is read-only (device reads included), every write is not, disconnect and reconnect are destructive', async () => {
+test('annotations: every read is read-only (device reads included), every write is not, and only the destructive writes are flagged', async () => {
     const tools = await listedTools({ CLOUDISP_ALLOW_WRITES: '1' });
 
     for (const tool of tools) {
@@ -941,12 +945,15 @@ test('annotations: every read is read-only (device reads included), every write 
         assert.equal(tool.annotations.readOnlyHint, READ_TOOL_NAMES.includes(tool.name), tool.name);
     }
 
-    for (const name of ['onu_read', 'onu_diagnose', 'olt_read', 'router_read']) {
+    for (const name of ['onu_read', 'onu_diagnose', 'olt_read', 'router_read', 'live_traffic']) {
         assert.equal(tools.find((tool) => tool.name === name).annotations.readOnlyHint, true, name);
     }
 
-    for (const name of ['disconnect_subscriber', 'reconnect_subscriber']) {
-        assert.equal(tools.find((tool) => tool.name === name).annotations.destructiveHint, true, name);
+    // The destructive writes are exactly these: they cut service, wipe the ONU or drop a live session.
+    const destructive = ['change_subscriber_bandwidth', 'disconnect_subscriber', 'reconnect_subscriber', 'factory_reset_onu', 'kick_pppoe'];
+
+    for (const tool of tools) {
+        assert.equal(tool.annotations.destructiveHint, destructive.includes(tool.name), tool.name);
     }
 });
 
@@ -969,8 +976,9 @@ test('every write tool starts with the confirmation prefix and requires idempote
 test('every tool that takes a subscriber offers subscriber_id and subscriber_query', async () => {
     const tools = await listedTools({ CLOUDISP_ALLOW_WRITES: '1' });
     const bySubscriber = ['get_subscriber', 'diagnose_subscriber', 'onu_read', 'onu_diagnose', 'list_onus', 'list_invoices', 'find_work_orders',
-        'reboot_onu', 'set_onu_catv', 'change_subscriber_wifi', 'change_wifi_radio', 'sync_onu', 'change_subscriber_plan',
-        'change_subscriber_bandwidth', 'disconnect_subscriber', 'reconnect_subscriber', 'create_work_order', 'assign_work_order'];
+        'subscriber_usage', 'device_tasks', 'live_traffic', 'reboot_onu', 'set_onu_catv', 'change_subscriber_wifi', 'change_wifi_radio', 'sync_onu',
+        'set_onu_admin_state', 'factory_reset_onu', 'optimize_wifi', 'restore_wifi', 'reprovision_onu', 'kick_pppoe', 'locate_new_onu', 'swap_onu',
+        'change_subscriber_plan', 'change_subscriber_bandwidth', 'disconnect_subscriber', 'reconnect_subscriber', 'create_work_order', 'assign_work_order'];
 
     for (const name of bySubscriber) {
         const { properties } = tools.find((tool) => tool.name === name).inputSchema;
@@ -991,7 +999,7 @@ test('initialize hands over the condensed core rules, cloudisp_context first', a
 
     const { instructions, serverInfo } = decodeMessages(Buffer.from(written.join(''), 'utf8'))[0].result;
 
-    assert.equal(serverInfo.version, '0.3.0');
+    assert.equal(serverInfo.version, '0.4.0');
     assert.ok(instructions.startsWith('Llamá cloudisp_context al iniciar cada conversación y antes de delegar'));
     assert.equal(instructions.split('\n').length, 6);
 });
@@ -1249,7 +1257,7 @@ test('stdio smoke: newline framing answers initialize and lists every tool with 
     const initialize = messages.find((message) => message.id === 1);
     assert.equal(initialize.result.protocolVersion, '2025-06-18');
     assert.equal(initialize.result.serverInfo.name, 'cloudisp-mcp');
-    assert.equal(initialize.result.serverInfo.version, '0.3.0');
+    assert.equal(initialize.result.serverInfo.version, '0.4.0');
     assert.match(initialize.result.instructions, /CLOUDISP_ALLOW_WRITES=1/);
     assert.ok(initialize.result.capabilities.tools);
 
@@ -1446,4 +1454,512 @@ test('list_internet_profiles requests the full active list, not the default 20-r
     assert.equal(urls.length, 1);
     assert.ok(urls[0].includes('status=active'));
     assert.ok(urls[0].includes('per_page=100'));
+});
+
+// ─── v0.4.0: dates in Salta time ─────────────────────────────────────────────
+
+test('toDisplayTime converts ISO instants of any zone to America/Argentina/Salta (-03:00)', () => {
+    const cases = {
+        '2026-10-14T13:00:00+00:00': '2026-10-14T10:00:00-03:00',
+        '2026-10-14T13:00:00Z': '2026-10-14T10:00:00-03:00',
+        '2026-10-14T13:00:00.123456+00:00': '2026-10-14T10:00:00-03:00',
+        '2026-10-14T13:00:00+0000': '2026-10-14T10:00:00-03:00',
+        '2026-10-14T13:00:00+00': '2026-10-14T10:00:00-03:00',
+        '2026-10-14T01:30:00+02:00': '2026-10-13T20:30:00-03:00',
+        '2026-10-14T10:00:00-03:00': '2026-10-14T10:00:00-03:00',
+        '2026-10-14T03:00:00Z': '2026-10-14T00:00:00-03:00',
+        '2027-01-01T02:59:59Z': '2026-12-31T23:59:59-03:00',
+        '2026-10-14T10:00Z': '2026-10-14T07:00:00-03:00',
+    };
+
+    for (const [input, expected] of Object.entries(cases)) {
+        assert.equal(toDisplayTime(input), expected, input);
+    }
+});
+
+test('toDisplayTime reads YYYY-MM-DD HH:MM:SS without a zone as UTC', () => {
+    assert.equal(toDisplayTime('2026-10-14 13:05:09'), '2026-10-14T10:05:09-03:00');
+    assert.equal(toDisplayTime('2026-10-14 02:00:00'), '2026-10-13T23:00:00-03:00');
+    assert.equal(toDisplayTime('2026-10-14 13:05:09.250000'), '2026-10-14T10:05:09-03:00');
+});
+
+test('toDisplayTime leaves everything that is not a date untouched', () => {
+    const untouched = [
+        '2026-10-14', '12:00:00', '2026-10-14T10:00:00', 'ONU 2026-10-14 13:00:00', '2026-10-14 13:00:00 UTC',
+        '2026-13-45T00:00:00Z', '2026-02-31T00:00:00Z', '2026-02-31 00:00:00', '2026-10-14 25:00:00',
+        'v1.2.3', 'ZTEG12345678', 'b464151bde68', '', 'null', 42, null, true, undefined, { at: '2026-10-14 13:00:00' },
+    ];
+
+    for (const value of untouched) {
+        assert.equal(toDisplayTime(value), value, String(value));
+    }
+});
+
+test('dispatch converts every date string of a payload, nested ones included, and nothing else', async () => {
+    const task = taskProjection(9, 'succeeded', {
+        sessions: [{ since: '2026-10-14 13:00:00', user: 'juan 2026-10-14 13:00:00', serial: 'ZTEG12345678' }],
+        day: '2026-10-14',
+    });
+    const { result } = await run('get_task', { task_run_id: 9 }, {
+        'GET /tasks/9': jsonResponse({ ...task, requested_at: '2026-10-14T13:00:00+00:00', finished_at: '2026-10-14T13:00:05Z' }),
+    });
+
+    assert.equal(result.requested_at, '2026-10-14T10:00:00-03:00');
+    assert.equal(result.finished_at, '2026-10-14T10:00:05-03:00');
+    assert.deepEqual(result.result, {
+        sessions: [{ since: '2026-10-14T10:00:00-03:00', user: 'juan 2026-10-14 13:00:00', serial: 'ZTEG12345678' }],
+        day: '2026-10-14',
+    });
+});
+
+// ─── v0.4.0: device_error ────────────────────────────────────────────────────
+
+/**
+ * Call one tool through an in-process stdio server (real clock, writes on) and decode its answer.
+ *
+ * @param {string} name Tool name.
+ * @param {object} args Tool arguments.
+ * @param {Record<string, object|Function>} routes Route table, see {@link mockApi}.
+ * @return {Promise<{ isError: boolean, payload: object }>}
+ */
+async function callOverStdio(name, args, routes) {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const written = [];
+
+    output.on('data', (chunk) => written.push(chunk.toString('utf8')));
+    startServer({
+        input,
+        output,
+        env: { CLOUDISP_API_BASE: API_BASE, CLOUDISP_API_KEY: API_KEY, CLOUDISP_ALLOW_WRITES: '1' },
+        fetchImpl: mockApi(routes).fetchImpl,
+    });
+    input.write(encodeLine({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const { result } = decodeMessages(Buffer.from(written.join(''), 'utf8')).find((message) => message.id === 1);
+
+    return { isError: result.isError, payload: JSON.parse(result.content[0].text) };
+}
+
+test('a succeeded task whose result carries an error is the device_error outcome, and not a tool error', async () => {
+    const routes = { 'GET /tasks/5527': jsonResponse(taskProjection(5527, 'succeeded', { error: 'onu_offline', onu_state: 'offline' })) };
+    const { result } = await run('get_task', { task_run_id: 5527 }, routes);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, 'device_error');
+    assert.equal(result.error, 'onu_offline');
+    assert.equal(result.task_run_id, 5527);
+    assert.equal(result.details.onu_state, 'offline');
+    assert.match(result.hint, /OT/);
+
+    const stdio = await callOverStdio('get_task', { task_run_id: 5527 }, routes);
+
+    assert.equal(stdio.isError, false);
+    assert.equal(stdio.payload.outcome, 'device_error');
+});
+
+test('restart_observed false on a succeeded task is a device_error too, and a replay flag survives', async () => {
+    const { result } = await run('reboot_onu', { ...WRITE_ARGS, subscriber_id: 42 }, {
+        'POST /subscribers/42/onu/actions': accepted(9, { replayed: true }),
+        'GET /tasks/9': jsonResponse(taskProjection(9, 'succeeded', { restart_observed: false })),
+    });
+
+    assert.equal(result.outcome, 'device_error');
+    assert.equal(result.error, 'restart_not_observed');
+    assert.equal(result.task_run_id, 9);
+    assert.equal(result.replayed, true);
+});
+
+test('a succeeded task without an error, and a failed one, are not device_error', async () => {
+    for (const result of [{ restart_observed: true, error: null }, { ssids: [] }, {}]) {
+        const done = await run('get_task', { task_run_id: 3 }, { 'GET /tasks/3': jsonResponse(taskProjection(3, 'succeeded', result)) });
+
+        assert.equal(done.result.success, true);
+        assert.equal(done.result.outcome, undefined);
+    }
+
+    const failed = await run('get_task', { task_run_id: 3 }, { 'GET /tasks/3': jsonResponse(taskProjection(3, 'failed', { error: 'x' }, 'onu_offline')) });
+
+    assert.equal(failed.result.outcome, 'task_failed');
+});
+
+// ─── v0.4.0: task budgets ────────────────────────────────────────────────────
+
+test('reboot, sync, reprovision, swap and factory reset wait up to 110 s; every other task tool keeps the 40 s budget', async () => {
+    const swap = { network_onu_id: 5, serial: 'ZTEG1', mac: 'b464151bde68' };
+    const cases = [
+        ['reboot_onu', {}, 'POST /subscribers/42/onu/actions', 110000],
+        ['sync_onu', {}, 'POST /subscribers/42/onu/sync', 110000],
+        ['reprovision_onu', {}, 'POST /subscribers/42/onu/provision', 110000],
+        ['swap_onu', swap, 'POST /subscribers/42/onu/swap', 110000],
+        ['factory_reset_onu', { confirm: 'factory_reset' }, 'POST /subscribers/42/onu/actions', 110000],
+        ['set_onu_catv', { catv_state: 'enable' }, 'POST /subscribers/42/onu/actions', 40000],
+        ['set_onu_admin_state', { admin_state: 'enable' }, 'POST /subscribers/42/onu/actions', 40000],
+        ['optimize_wifi', { mode: 'preview' }, 'POST /subscribers/42/onu/actions', 40000],
+        ['restore_wifi', {}, 'POST /subscribers/42/onu/actions', 40000],
+        ['onu_read', { operation: 'onu.wan_read' }, 'POST /subscribers/42/onu/reads', 40000],
+        ['onu_diagnose', {}, 'POST /subscribers/42/onu/diagnose', 40000],
+    ];
+
+    for (const [name, args, route, budget] of cases) {
+        const clock = virtualClock();
+        const { result } = await run(name, { ...WRITE_ARGS, subscriber_id: 42, ...args }, {
+            [route]: accepted(9),
+            'GET /tasks/9': jsonResponse(taskProjection(9, 'running')),
+        }, clock);
+
+        assert.deepEqual(result, { status: 'pending', task_run_id: 9 }, name);
+        assert.equal(clock.elapsed, budget, name);
+    }
+});
+
+test('get_task with wait_seconds polls until the task finishes, or answers pending when the time is up', async () => {
+    const running = jsonResponse(taskProjection(9, 'running'));
+    const waiting = virtualClock();
+    const stuck = await run('get_task', { task_run_id: 9, wait_seconds: 30 }, { 'GET /tasks/9': running }, waiting);
+
+    assert.deepEqual(stuck.result, { status: 'pending', task_run_id: 9 });
+    assert.equal(waiting.elapsed, 30000);
+
+    const finishing = virtualClock();
+    const done = await run('get_task', { task_run_id: 9, wait_seconds: 110 }, {
+        'GET /tasks/9': sequence(running, running, jsonResponse(taskProjection(9, 'succeeded', { ok: true }))),
+    }, finishing);
+
+    assert.equal(done.result.status, 'succeeded');
+    assert.equal(finishing.elapsed, 4000);
+    assert.equal(done.calls.length, 3);
+});
+
+test('get_task answers at once without wait_seconds (or with 0) and refuses a wait beyond 110 s without HTTP', async () => {
+    for (const args of [{ task_run_id: 9 }, { task_run_id: 9, wait_seconds: 0 }]) {
+        const clock = virtualClock();
+        const { calls } = await run('get_task', args, { 'GET /tasks/9': jsonResponse(taskProjection(9, 'running')) }, clock);
+
+        assert.equal(calls.length, 1);
+        assert.equal(clock.elapsed, 0);
+    }
+
+    for (const wait_seconds of [111, -1, 1.5, 'later']) {
+        const { result, calls } = await run('get_task', { task_run_id: 9, wait_seconds });
+
+        assert.equal(result.outcome, 'validation_failed', String(wait_seconds));
+        assert.equal(calls.length, 0);
+    }
+});
+
+// ─── v0.4.0: new reads ───────────────────────────────────────────────────────
+
+test('list_onus passes the model, firmware, platform and offline filters; network_snapshot passes platform_id', async () => {
+    const ok = jsonResponse({ success: true, data: [], meta: { total: 0 } });
+    const onus = await run('list_onus', { product_class: 'F670L', firmware: 'V9.0.11', platform_id: 3, offline_only: true, per_page: 1 }, { 'GET /network/onus': ok });
+
+    assert.equal(onus.calls[0].query.get('product_class'), 'F670L');
+    assert.equal(onus.calls[0].query.get('firmware'), 'V9.0.11');
+    assert.equal(onus.calls[0].query.get('platform_id'), '3');
+    assert.equal(onus.calls[0].query.get('offline_only'), '1');
+
+    const plain = await run('list_onus', { offline_only: false }, { 'GET /network/onus': ok });
+
+    assert.equal(plain.calls[0].query.has('offline_only'), false);
+
+    const snapshot = await run('network_snapshot', { platform_id: 15 }, { 'GET /operations/snapshot': ok });
+
+    assert.equal(snapshot.calls[0].query.get('platform_id'), '15');
+    assert.equal((await run('network_snapshot', {}, { 'GET /operations/snapshot': ok })).calls[0].query.has('platform_id'), false);
+});
+
+test('list_onu_models, get_router, olt_poll_runs and list_eoc_masters map onto their endpoints', async () => {
+    const ok = jsonResponse({ success: true, data: [] });
+    const routes = {
+        'GET /network/onu-models': ok, 'GET /network/routers/5': ok, 'GET /network/olts/6/poll-runs': ok, 'GET /network/eoc-masters': ok,
+    };
+
+    const models = await run('list_onu_models', { platform_id: 3 }, routes);
+    const router = await run('get_router', { router_id: 5 }, routes);
+    const polls = await run('olt_poll_runs', { olt_id: 6, limit: 5 }, routes);
+    const masters = await run('list_eoc_masters', { platform_id: 15 }, routes);
+
+    assert.deepEqual(sig(models.calls), ['GET /network/onu-models']);
+    assert.equal(models.calls[0].query.get('platform_id'), '3');
+    assert.deepEqual(sig(router.calls), ['GET /network/routers/5']);
+    assert.deepEqual(sig(polls.calls), ['GET /network/olts/6/poll-runs']);
+    assert.equal(polls.calls[0].query.get('limit'), '5');
+    assert.deepEqual(sig(masters.calls), ['GET /network/eoc-masters']);
+    assert.equal(masters.calls[0].query.get('platform_id'), '15');
+
+    for (const [name, args] of [['get_router', {}], ['olt_poll_runs', {}]]) {
+        const refused = await run(name, args);
+
+        assert.equal(refused.result.outcome, 'validation_failed', name);
+        assert.equal(refused.calls.length, 0);
+    }
+});
+
+test('subscriber_usage resolves the subscriber and passes the window; a bad window is refused without HTTP', async () => {
+    const routes = { 'GET /subscribers': ONE_SUBSCRIBER, 'GET /subscribers/42/usage': jsonResponse({ success: true, data: { download_bytes: 10 } }) };
+    const { result, calls } = await run('subscriber_usage', { subscriber_query: 'Perez', window: '7d' }, routes);
+
+    assert.deepEqual(sig(calls), ['GET /subscribers', 'GET /subscribers/42/usage']);
+    assert.equal(calls[1].query.get('window'), '7d');
+    assert.equal(result.data.download_bytes, 10);
+
+    const defaulted = await run('subscriber_usage', { subscriber_id: 42 }, routes);
+
+    assert.equal(defaulted.calls[0].query.has('window'), false);
+
+    const refused = await run('subscriber_usage', { subscriber_id: 42, window: '1y' }, routes);
+
+    assert.equal(refused.result.outcome, 'validation_failed');
+    assert.equal(refused.calls.length, 0);
+});
+
+test('usage_ranking maps its filters onto the query string and caps limit at 50', async () => {
+    const routes = { 'GET /network/usage/ranking': jsonResponse({ success: true, data: [], no_data: [] }) };
+    const { calls } = await run('usage_ranking', {
+        platform_id: 4, olt_id: 6, pon_slot: 0, pon_port: 3, window: '7d', order: 'asc', limit: 10,
+    }, routes);
+
+    assert.deepEqual(Object.fromEntries(calls[0].query), {
+        platform_id: '4', olt_id: '6', pon_slot: '0', pon_port: '3', window: '7d', order: 'asc', limit: '10',
+    });
+
+    for (const args of [{ limit: 51 }, { window: '30d' }, { order: 'up' }]) {
+        const refused = await run('usage_ranking', args, routes);
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.calls.length, 0);
+    }
+});
+
+test('device_tasks reads a device or a subscriber, never both and never neither', async () => {
+    const ok = jsonResponse({ success: true, data: [] });
+    const routes = { 'GET /network/devices/olt/6/tasks': ok, 'GET /subscribers/42/tasks': ok, 'GET /subscribers': ONE_SUBSCRIBER };
+
+    const device = await run('device_tasks', { kind: 'olt', device_id: 6, limit: 20 }, routes);
+
+    assert.deepEqual(sig(device.calls), ['GET /network/devices/olt/6/tasks']);
+    assert.equal(device.calls[0].query.get('limit'), '20');
+
+    const subscriber = await run('device_tasks', { subscriber_query: 'Perez' }, routes);
+
+    assert.deepEqual(sig(subscriber.calls), ['GET /subscribers', 'GET /subscribers/42/tasks']);
+
+    for (const args of [{}, { kind: 'olt', device_id: 6, subscriber_id: 42 }, { kind: 'switch', device_id: 6 }, { kind: 'olt' }, { subscriber_id: 42, limit: 51 }]) {
+        const refused = await run('device_tasks', args, routes);
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.calls.length, 0);
+    }
+});
+
+test('live_traffic answers the first 200; while the API answers 202 it asks again every 2 s, up to 5 times', async () => {
+    const sample = jsonResponse({
+        success: true,
+        data: { download_bps: 1200, upload_bps: 300, sampled_at: '2026-10-14T13:00:00+00:00', source: 'redis', task_run_id: 4 },
+    });
+    const clock = virtualClock();
+    const started = await run('live_traffic', { subscriber_id: 42 }, {
+        'POST /subscribers/42/live-traffic': sequence(accepted(4), accepted(4), sample),
+    }, clock);
+
+    assert.deepEqual(sig(started.calls), Array(3).fill('POST /subscribers/42/live-traffic'));
+    assert.equal(clock.elapsed, 4000);
+    assert.equal(started.result.data.download_bps, 1200);
+    assert.equal(started.result.data.sampled_at, '2026-10-14T10:00:00-03:00');
+
+    const stuckClock = virtualClock();
+    const stuck = await run('live_traffic', { subscriber_id: 42 }, { 'POST /subscribers/42/live-traffic': accepted(4) }, stuckClock);
+
+    assert.equal(stuck.calls.length, 5, 'no GET /tasks: the watch task never carries the sample');
+    assert.equal(stuckClock.elapsed, 8000);
+    assert.equal(stuck.result.status, 'pending');
+    assert.equal(stuck.result.task_run_id, 4);
+
+    const refused = await run('live_traffic', { subscriber_id: 42 }, {
+        'POST /subscribers/42/live-traffic': errorResponse(422, { code: 'onu_not_linked', message: 'No ONU.' }),
+    });
+
+    assert.equal(refused.result.outcome, 'onu_not_linked');
+    assert.equal(refused.calls.length, 1);
+});
+
+test('onu_read onu.wifi_password_check runs onu.wifi_read first and posts ssid_index with that read\'s task id', async () => {
+    const { result, calls } = await run('onu_read', { subscriber_id: 42, operation: 'onu.wifi_password_check', parameters: { ssid_index: 1 } }, {
+        'POST /subscribers/42/onu/reads': (call) => (call.body.operation === 'onu.wifi_read' ? accepted(7) : accepted(8)),
+        'GET /tasks/7': jsonResponse(taskProjection(7, 'succeeded', { ssids: [{ index: 1 }] })),
+        'GET /tasks/8': jsonResponse(taskProjection(8, 'succeeded', { match: true })),
+    });
+
+    assert.deepEqual(sig(calls), ['POST /subscribers/42/onu/reads', 'GET /tasks/7', 'POST /subscribers/42/onu/reads', 'GET /tasks/8']);
+    assert.deepEqual(calls[0].body, { operation: 'onu.wifi_read', parameters: {} });
+    assert.deepEqual(calls[2].body, { operation: 'onu.wifi_password_check', parameters: { ssid_index: 1, based_on_task_run_id: 7 } });
+    assert.equal(result.result.match, true);
+
+    for (const parameters of [undefined, {}, { ssid_index: 9 }, { ssid_index: 0 }]) {
+        const refused = await run('onu_read', { subscriber_id: 42, operation: 'onu.wifi_password_check', parameters });
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(parameters));
+        assert.equal(refused.calls.length, 0);
+    }
+
+    const unreadable = await run('onu_read', { subscriber_id: 42, operation: 'onu.wifi_password_check', parameters: { ssid_index: 1 } }, {
+        'POST /subscribers/42/onu/reads': errorResponse(422, { code: 'onu_not_linked', message: 'No ONU.' }),
+    });
+
+    assert.equal(unreadable.result.outcome, 'onu_not_linked');
+    assert.equal(unreadable.calls.length, 1, 'no password check without a WiFi read');
+});
+
+// ─── v0.4.0: new writes ──────────────────────────────────────────────────────
+
+const OPTIMIZE_PLAN = [{ control: 'channel', band: '2.4', from: 6, to: 11 }];
+
+test('the new ONU writes post their operation or endpoint with the idempotency key and requested_by, then await the task', async () => {
+    const cases = [
+        ['set_onu_admin_state', { admin_state: 'disable' }, '/onu/actions', { operation: 'olt.onu_admin_state', parameters: { admin_state: 'disable' } }],
+        ['factory_reset_onu', { confirm: 'factory_reset' }, '/onu/actions', { operation: 'onu.factory_reset', parameters: { confirm: 'factory_reset' } }],
+        ['restore_wifi', {}, '/onu/actions', { operation: 'onu.wifi_restore', parameters: {} }],
+        ['optimize_wifi', { mode: 'preview' }, '/onu/actions', { operation: 'onu.wifi_optimize', parameters: { mode: 'preview' } }],
+        ['optimize_wifi', { mode: 'apply', plan: OPTIMIZE_PLAN }, '/onu/actions', { operation: 'onu.wifi_optimize', parameters: { mode: 'apply', plan: OPTIMIZE_PLAN } }],
+        ['reprovision_onu', {}, '/onu/provision', {}],
+        [
+            'swap_onu',
+            { network_onu_id: 5, serial: 'ZTEG1', mac: 'b464151bde68', ssid_24: 'Casa', wifi_password: 'S3cr3t-pass', keep_password: false },
+            '/onu/swap',
+            { network_onu_id: 5, serial: 'ZTEG1', mac: 'b464151bde68', ssid_24: 'Casa', wifi_password: 'S3cr3t-pass', keep_password: false },
+        ],
+    ];
+
+    for (const [name, args, suffix, body] of cases) {
+        const { result, calls } = await run(name, { ...WRITE_ARGS, subscriber_id: 42, ...args }, {
+            [`POST /subscribers/42${suffix}`]: accepted(9),
+            'GET /tasks/9': jsonResponse(taskProjection(9, 'succeeded', { done: true })),
+        });
+
+        assert.deepEqual(sig(calls), [`POST /subscribers/42${suffix}`, 'GET /tasks/9'], name);
+        assert.deepEqual(calls[0].body, body, name);
+        assert.equal(calls[0].headers['Idempotency-Key'], 'op-1', name);
+        assert.equal(calls[0].headers['X-CloudISP-Requested-By'], 'Marcos Rivadeo', name);
+        assert.equal(result.task_run_id, 9, name);
+    }
+});
+
+test('the new writes resolve a subscriber_query to exactly one subscriber before any POST', async () => {
+    const ambiguous = await run('reprovision_onu', { ...WRITE_ARGS, subscriber_query: 'Perez' }, {
+        'GET /subscribers': jsonResponse({ success: true, data: [{ id: 1 }, { id: 2 }], meta: { total: 2 } }),
+    });
+
+    assert.equal(ambiguous.result.outcome, 'ambiguous_subscriber');
+    assert.deepEqual(sig(ambiguous.calls), ['GET /subscribers']);
+
+    const resolved = await run('kick_pppoe', { ...WRITE_ARGS, subscriber_query: 'Perez' }, {
+        'GET /subscribers': ONE_SUBSCRIBER,
+        'POST /subscribers/42/pppoe/kick': jsonResponse({ success: true, data: { outcome: 'disconnected' } }),
+    });
+
+    assert.deepEqual(sig(resolved.calls), ['GET /subscribers', 'POST /subscribers/42/pppoe/kick']);
+});
+
+test('the new writes refuse invalid arguments without any HTTP call', async () => {
+    const refusals = [
+        ['set_onu_admin_state', {}],
+        ['set_onu_admin_state', { admin_state: 'reboot' }],
+        ['factory_reset_onu', {}],
+        ['factory_reset_onu', { confirm: 'yes' }],
+        ['optimize_wifi', {}],
+        ['optimize_wifi', { mode: 'now' }],
+        ['optimize_wifi', { mode: 'apply' }],
+        ['optimize_wifi', { mode: 'apply', plan: [] }],
+        ['optimize_wifi', { mode: 'apply', plan: ['channel'] }],
+        ['optimize_wifi', { mode: 'preview', plan: OPTIMIZE_PLAN }],
+        ['locate_new_onu', {}],
+        ['locate_new_onu', { mac: 'b464151bde' }],
+        ['swap_onu', { network_onu_id: 5, serial: 'ZTEG1', mac: 'not a mac' }],
+        ['swap_onu', { serial: 'ZTEG1', mac: 'b464151bde68' }],
+        ['swap_onu', { network_onu_id: 5, mac: 'b464151bde68' }],
+    ];
+
+    for (const [name, args] of refusals) {
+        const { result, calls } = await run(name, { ...WRITE_ARGS, subscriber_id: 42, ...args });
+
+        assert.equal(result.outcome, 'validation_failed', `${name} ${JSON.stringify(args)}`);
+        assert.equal(calls.length, 0, name);
+    }
+});
+
+test('kick_pppoe answers the synchronous result; refusals are outcomes, not tool errors', async () => {
+    const done = await run('kick_pppoe', { ...WRITE_ARGS, subscriber_id: 42 }, {
+        'POST /subscribers/42/pppoe/kick': jsonResponse({ success: true, data: { outcome: 'disconnected' } }),
+    });
+
+    assert.deepEqual(sig(done.calls), ['POST /subscribers/42/pppoe/kick']);
+    assert.deepEqual(done.calls[0].body, {});
+    assert.equal(done.calls[0].headers['Idempotency-Key'], 'op-1');
+    assert.equal(done.result.data.outcome, 'disconnected');
+
+    for (const [status, code] of [[409, 'no_active_session'], [422, 'kick_unavailable']]) {
+        const refused = await run('kick_pppoe', { ...WRITE_ARGS, subscriber_id: 42 }, {
+            'POST /subscribers/42/pppoe/kick': errorResponse(status, { code, message: 'No.' }),
+        });
+
+        assert.equal(refused.result.ok, false);
+        assert.equal(refused.result.outcome, code);
+    }
+});
+
+test('locate_new_onu awaits the task of every OLT and merges their matches with the OLT', async () => {
+    const { result, calls } = await run('locate_new_onu', { ...WRITE_ARGS, subscriber_id: 42, mac: 'B4:64:15:1B:DE:68' }, {
+        'POST /subscribers/42/onu/swap/locate': jsonResponse({
+            success: true,
+            data: {
+                tasks: [
+                    { olt_id: 6, olt_name: '300 Viviendas', task_run_id: 11, request_id: 'r11' },
+                    { olt_id: 8, olt_name: 'Santa Rita', task_run_id: 12, request_id: 'r12' },
+                ],
+                errors: [{ olt_id: 9, olt_name: 'Otra', error: 'olt_unreachable' }],
+            },
+        }, 202),
+        'GET /tasks/11': jsonResponse(taskProjection(11, 'succeeded', {
+            matches: [{ network_onu_id: 77, serial: 'ZTEG1B1B1B1B', pon_slot: 0, pon_port: 3, onu_index: 12, model: 'F670L', state: 'online', linked_client_id: null }],
+        })),
+        'GET /tasks/12': jsonResponse(taskProjection(12, 'failed', {}, 'olt_rejected')),
+    });
+
+    assert.deepEqual(calls[0].body, { mac: 'B4:64:15:1B:DE:68' });
+    assert.equal(calls[0].headers['Idempotency-Key'], 'op-1');
+    assert.equal(result.success, true);
+    assert.equal(result.matches.length, 1);
+    assert.deepEqual(
+        { olt_id: result.matches[0].olt_id, olt_name: result.matches[0].olt_name, network_onu_id: result.matches[0].network_onu_id, serial: result.matches[0].serial },
+        { olt_id: 6, olt_name: '300 Viviendas', network_onu_id: 77, serial: 'ZTEG1B1B1B1B' },
+    );
+    assert.deepEqual(result.olts.map((olt) => [olt.olt_id, olt.status, olt.error_code]), [[6, 'succeeded', null], [8, 'failed', 'olt_rejected']]);
+    assert.deepEqual(result.errors, [{ olt_id: 9, olt_name: 'Otra', error: 'olt_unreachable' }]);
+
+    const refused = await run('locate_new_onu', { ...WRITE_ARGS, subscriber_id: 42, mac: 'b464151bde68' }, {
+        'POST /subscribers/42/onu/swap/locate': errorResponse(422, { code: 'invalid_mac', message: 'No es una MAC válida.' }),
+    });
+
+    assert.equal(refused.result.outcome, 'invalid_mac');
+});
+
+test('swap_onu refusals from the API are outcomes', async () => {
+    for (const code of ['onu_serial_mismatch', 'onu_mac_mismatch', 'onu_not_found']) {
+        const { result } = await run('swap_onu', { ...WRITE_ARGS, subscriber_id: 42, network_onu_id: 5, serial: 'Z', mac: 'b464151bde68' }, {
+            'POST /subscribers/42/onu/swap': errorResponse(409, { code, message: 'No.' }),
+        });
+
+        assert.equal(result.outcome, code);
+    }
+});
+
+test('wifi_password never reaches the model, even when the API echoes it', async () => {
+    const { payload } = await callOverStdio('get_task', { task_run_id: 9 }, {
+        'GET /tasks/9': jsonResponse(taskProjection(9, 'succeeded', { wifi_password: 'S3cr3t-wifi', name: 'Casa' })),
+    });
+
+    assert.equal(payload.result.name, 'Casa');
+    assert.equal(JSON.stringify(payload).includes('S3cr3t'), false);
 });

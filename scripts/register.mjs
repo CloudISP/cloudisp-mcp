@@ -114,7 +114,7 @@ if (fs.existsSync(path.join(home, '.omp', 'agent'))) {
     const ok = mergeJson(path.join(home, '.omp', 'agent', 'mcp.json'), {}, (data) => {
         data.mcpServers ??= {};
         for (const env of envs) {
-            data.mcpServers[serverName(env)] = { type: 'stdio', command: launcher, args: [env], enabled: true, timeout: 120000 };
+            data.mcpServers[serverName(env)] = { type: 'stdio', command: launcher, args: [env], enabled: true, timeout: 150000 };
         }
     });
     summary.push(`omp: ${ok ? 'registrado' : 'manual (mcp.json no es JSON válido)'}`);
@@ -139,7 +139,7 @@ if (fs.existsSync(path.join(home, '.pi', 'agent'))) {
 // opencode
 const opencodeDir = path.join(home, '.config', 'opencode');
 if (fs.existsSync(opencodeDir)) {
-    const entries = Object.fromEntries(envs.map((env) => [serverName(env), { type: 'local', command: [launcher, env], enabled: true, timeout: 120000 }]));
+    const entries = Object.fromEntries(envs.map((env) => [serverName(env), { type: 'local', command: [launcher, env], enabled: true, timeout: 150000 }]));
     const ok = mergeJson(path.join(opencodeDir, 'opencode.json'), { $schema: 'https://opencode.ai/config.json' }, (data) => {
         data.mcp = { ...(data.mcp ?? {}), ...entries };
     });

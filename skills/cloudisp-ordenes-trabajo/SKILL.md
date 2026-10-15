@@ -37,13 +37,29 @@ escritura lleva resumen, confirmación con botones, `requested_by` e
 
 ### Visita técnica por reinicio fallido
 
-Si `reboot_onu` falló, ofrecé una OT `technical_visit` con esta descripción:
+Si `reboot_onu` falló o terminó con `device_error` (`onu_offline`,
+`restart_not_observed`), ofrecé una OT `technical_visit` con esta descripción:
 
 > Esta ONU no pudo ser reiniciada remotamente, se recomienda una visita técnica.
 > Se puede solicitar al abonado que apague y vuelva a prender su equipo.
 
 Antes de crearla mirá si ya hay una visita pendiente del abonado
 (`find_work_orders`, `type: technical_visit`, `status: pending`).
+
+### Cambio de ONU (OT `equipment_change`)
+
+Cuando hay que reemplazar la ONU de un abonado, el técnico trae la MAC de la
+nueva y se hace en dos pasos, cada uno con su confirmación:
+
+1. `locate_new_onu` con `subscriber_id` y `mac` busca la ONU nueva en las OLT de
+   la plataforma del abonado (una búsqueda por OLT; solo lee). Devuelve
+   `matches` con `olt_name`, `network_onu_id`, `serial`, `pon_slot`, `pon_port`,
+   `model`, `state` y `linked_client_id`. Sin coincidencias, o con una ya
+   vinculada a otro abonado (`linked_client_id`), no sigas: decilo.
+2. Confirmá con el técnico cuál es (OLT, PON y serial) y llamá `swap_onu` con
+   `network_onu_id`, `serial` y `mac` de esa coincidencia; `ssid_24`, `ssid_5`,
+   `wifi_password` y `keep_password` solo si los pide. Espera hasta 110 s.
+   `onu_serial_mismatch`, `onu_mac_mismatch` u `onu_not_found` → volvé a ubicarla.
 
 ## Asignar — `assign_work_order`
 

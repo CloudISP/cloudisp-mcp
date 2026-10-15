@@ -11,7 +11,8 @@ Respondé en **español**. Todo esto es solo lectura: no requiere confirmación.
 
 ## Resumen general — `network_snapshot`
 
-Llamalo sin argumentos e informá solo lo que devuelve:
+Llamalo sin argumentos (todas las plataformas visibles) o con `platform_id`, e
+informá solo lo que devuelve:
 
 - **Abonados online** — `clients_online` con su fecha de captura.
 - **Throughput WAN** — bajada y subida en Mbps, con la interfaz y su fecha de
@@ -22,8 +23,10 @@ Llamalo sin argumentos e informá solo lo que devuelve:
 - El **reporte de consumo de 24 horas no está disponible**
   (`usage_24h.available` es siempre `false`). No lo estimes ni presentes el
   throughput como consumo o como porcentaje de saturación.
-- El snapshot es de la plataforma a la que pertenece la clave; no es tráfico por
-  abonado.
+- Sin `platform_id` el snapshot suma **todas las plataformas visibles** y trae el
+  detalle en `platforms[]`; con `platform_id` (2, 3, 4 o 15) es solo esa. No es
+  tráfico por abonado: para eso `subscriber_usage` y `usage_ranking`
+  (`cloudisp-red`).
 
 ## Estado de equipos
 

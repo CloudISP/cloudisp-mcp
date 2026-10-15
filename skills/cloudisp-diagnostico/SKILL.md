@@ -28,9 +28,15 @@ abiertas.
    - `lifecycle_status` distinto de `active` → informalo.
    - Una sección en `null` (ver `section_errors`) = "no disponible".
 3. **¿Hay sesión PPPoE activa?** (`network_context` / `consumption`).
-   - **Sí** → el problema es WiFi/LAN. Hacé `onu_read` con `onu.wifi_read` y
-     `onu.wifi_diagnose` y ofrecé cambio de canal o de WiFi
-     (`change_wifi_radio` / `change_subscriber_wifi`).
+   - **Sí** → el problema es WiFi/LAN o una sesión colgada. Mirá el tráfico real
+     con `live_traffic` (`download_bps` / `upload_bps`) y `subscriber_usage`. Sin
+     tráfico y con sesión → ofrecé `kick_pppoe` (cierra la sesión PPPoE y el CPE
+     reconecta). Con tráfico → hacé `onu_read` con `onu.wifi_read` y
+     `onu.wifi_diagnose`, y ofrecé cambio de canal o de WiFi
+     (`change_wifi_radio` / `change_subscriber_wifi`); `optimize_wifi` en
+     `preview` propone canales sin tocar nada. Si dudan de la clave WiFi,
+     `onu_read` con `onu.wifi_password_check` (`parameters.ssid_index`) dice si
+     coincide con la registrada, sin mostrarla.
 4. **Sin sesión → mirá la ONU.**
    - `state` `offline` o `los` → `list_onus` del mismo PON (`olt_id`, `pon_slot`,
      `pon_port`).
@@ -40,15 +46,22 @@ abiertas.
    - Online con **RX menor a −27 dBm** → problema óptico: ofrecé OT de visita.
    - Online con RX OK y sin PPPoE → `onu_diagnose` (sync solo lectura).
      - Si detecta un canal faltante o incorrecto → ofrecé `sync_onu`.
+     - Si la ONU perdió su configuración (WAN o TR-069 ilegibles, por ejemplo
+       tras un restablecimiento) → ofrecé `reprovision_onu`.
      - Si responde `sync_template_missing` → **"modelo no adaptado"**: ofrecé
        reinicio (`reboot_onu`) y, si falla, la OT.
-5. **Si sigue sin resolverse:** `platform_logs` (syslog del router/OLT de la
-   plataforma del abonado, últimas 2 h, filtrado por el usuario PPPoE con `q`) y
-   `router_read` con `routeros.test_command` (`command` `/interface/print`) y `list_routers`.
-6. **Reinicio fallido:** ofrecé `create_work_order` con `type`
-   `technical_visit` y la descripción: *"Esta ONU no pudo ser reiniciada
-   remotamente, se recomienda una visita técnica. Se puede solicitar al abonado
-   que apague y vuelva a prender su equipo."* (ver `cloudisp-ordenes-trabajo`).
+5. **Si sigue sin resolverse:** `device_tasks` con el abonado (qué se intentó en
+   su ONU y su router y por qué falló), `platform_logs` (syslog del router/OLT de
+   la plataforma del abonado, últimas 2 h, filtrado por el usuario PPPoE con `q`)
+   y `router_read` con `routeros.test_command` (`command` `/interface/print`) y
+   `list_routers`. Las horas ya vienen en hora de Salta (`-03:00`).
+6. **Reinicio fallido:** un reinicio que falló, o que terminó con `device_error`
+   (`onu_offline` o `restart_not_observed`: la ONU nunca volvió), cuenta como
+   fallido. Ofrecé `create_work_order` con `type` `technical_visit` y la
+   descripción: *"Esta ONU no pudo ser reiniciada remotamente, se recomienda una
+   visita técnica. Se puede solicitar al abonado que apague y vuelva a prender su
+   equipo."* (ver `cloudisp-ordenes-trabajo`). No ofrezcas
+   `factory_reset_onu` salvo que el técnico lo pida: es el último recurso.
 7. **OTs abiertas:** si ya hay una visita pendiente (`find_work_orders` con
    `status: pending`), mencionala en vez de abrir otra.
 

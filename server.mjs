@@ -15,7 +15,7 @@
 import { pathToFileURL } from 'node:url';
 
 const SERVER_NAME = 'cloudisp-mcp';
-const SERVER_VERSION = '0.3.0';
+const SERVER_VERSION = '0.4.0';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const API_PREFIX = '/api/v1/public';
 const REQUEST_TIMEOUT_MS = 30000;
@@ -23,6 +23,12 @@ const REQUEST_TIMEOUT_MS = 30000;
 /** How long (and how often) a dispatched device task is polled before the tool answers `pending`. */
 const TASK_TIMEOUT_MS = 40000;
 const TASK_INTERVAL_MS = 2000;
+
+/** Budget of the device tasks that outlast a read: reboot, sync, reprovision, swap, factory reset. */
+const LONG_TASK_TIMEOUT_MS = 110000;
+
+/** Longest `get_task` wait, in seconds (the same budget). */
+const MAX_TASK_WAIT_SECONDS = 110;
 
 /** Header carrying who asked for a write; the API logs it and stamps it on audit text. */
 const REQUESTED_BY_HEADER = 'X-CloudISP-Requested-By';
@@ -34,7 +40,7 @@ const WRITE_PREFIX = 'ESCRITURA (requiere confirmación del operador): ';
 /** Hint handed to the client during `initialize`: the agent's core rules, condensed. */
 const INSTRUCTIONS = [
     'Llamá cloudisp_context al iniciar cada conversación y antes de delegar; obedecé sus reglas y artículos.',
-    'Nunca adivines ids: resolvé al abonado con búsqueda y, si hay más de uno, preguntá mostrando candidatos. Dato faltante = "no disponible", nunca 0.',
+    'Nunca adivines ids: resolvé al abonado con búsqueda y, si hay más de uno, preguntá mostrando candidatos. Dato faltante = "no disponible", nunca 0. Las horas ya vienen en hora de Salta (-03:00): no las conviertas.',
     'Toda escritura: resumen (abonado, id, plataforma, ONU, acción, impacto) y confirmación explícita del operador antes de llamar la tool; una acción por confirmación, nunca encadenes escrituras.',
     'Pasá siempre requested_by con el nombre de quien pidió y una idempotency_key nueva por acción (reusala solo para reintentar la misma).',
     'Nunca muestres contraseñas, PSK, documentos ni teléfonos. No podés crear, editar ni borrar OLTs, routers, masters, plataformas ni perfiles. Subagentes: solo lecturas.',
@@ -675,16 +681,14 @@ async function assignWorkOrder(args, fetchImpl) {
 }
 
 /**
- * `network_snapshot` — `GET /operations/snapshot`.
+ * `network_snapshot` — `GET /operations/snapshot`, optionally for one platform.
  *
- * @param {object} _args Tool arguments (unused).
+ * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
  * @return {Promise<object>} Public API envelope.
  */
-async function networkSnapshot(_args, fetchImpl) {
-    const response = await apiRequest(fetchImpl, 'GET', '/operations/snapshot');
-
-    return isFailure(response) ? apiFailurePayload(response) : response.body;
+async function networkSnapshot(args, fetchImpl) {
+    return call(fetchImpl, 'GET', '/operations/snapshot', { query: { platform_id: optInt(args, 'platform_id') } });
 }
 
 // ─── Task polling ────────────────────────────────────────────────────────────
@@ -758,9 +762,10 @@ export async function awaitTask(fetchImpl, taskRunId, options = {}) {
  * @param {Function} fetchImpl `fetch`-compatible implementation.
  * @param {object} clock Clock seams (`now`, `sleep`).
  * @param {{ ok: boolean, status: number, body: unknown }} response Normalized dispatch response.
+ * @param {number} [timeoutMs] Polling budget (the 40 s default when omitted).
  * @return {Promise<object>} Failure payload, the dispatch body when it carries no task, or the awaited projection (with `replayed` when the API reported it).
  */
-async function awaitDispatched(fetchImpl, clock, response) {
+async function awaitDispatched(fetchImpl, clock, response, timeoutMs) {
     if (isFailure(response)) {
         return apiFailurePayload(response);
     }
@@ -772,7 +777,7 @@ async function awaitDispatched(fetchImpl, clock, response) {
         return body;
     }
 
-    const task = await awaitTask(fetchImpl, taskRunId, clock);
+    const task = await awaitTask(fetchImpl, taskRunId, timeoutMs === undefined ? clock : { ...clock, timeoutMs });
     const replayed = body.replayed ?? body.data?.replayed;
 
     return replayed === undefined ? task : { ...task, replayed };
@@ -783,7 +788,7 @@ async function awaitDispatched(fetchImpl, clock, response) {
 /** ONU read operations `POST /subscribers/{id}/onu/reads` accepts. */
 const ONU_READ_OPERATIONS = [
     'olt.onu_details_read', 'olt.onu_health_check', 'onu.tr069_read', 'onu.wan_read',
-    'onu.wifi_read', 'onu.catv_read', 'onu.wifi_diagnose',
+    'onu.wifi_read', 'onu.catv_read', 'onu.wifi_diagnose', 'onu.wifi_password_check',
 ];
 
 /** OLT read operations the public API may enable (netwatcher routable ∩ admin allowlist). */
@@ -889,7 +894,8 @@ const getSubscriber = subscriberRead('');
 const diagnoseSubscriber = subscriberRead('/diagnosis');
 
 /**
- * `onu_read` — `POST /subscribers/{id}/onu/reads`, then waits for the task.
+ * `onu_read` — `POST /subscribers/{id}/onu/reads`, then waits for the task. `onu.wifi_password_check` is based on a
+ * fresh `onu.wifi_read`, like the WiFi writes.
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
@@ -898,9 +904,26 @@ const diagnoseSubscriber = subscriberRead('/diagnosis');
  */
 async function onuRead(args, fetchImpl, clock) {
     const operation = requireOperation(args, ONU_READ_OPERATIONS);
-    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+    let ssidIndex = null;
 
-    return postRead(fetchImpl, clock, `/subscribers/${subscriberId}/onu/reads`, operation, args);
+    if (operation === 'onu.wifi_password_check') {
+        ssidIndex = asPositiveInt(isPlainObject(args.parameters) ? args.parameters.ssid_index : undefined);
+
+        if (ssidIndex === null || ssidIndex > 8) {
+            fail(invalid('onu.wifi_password_check requires parameters.ssid_index (1 to 8).'));
+        }
+    }
+
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+    const path = `/subscribers/${subscriberId}/onu/reads`;
+
+    if (ssidIndex === null) {
+        return postRead(fetchImpl, clock, path, operation, args);
+    }
+
+    const read = await requireWifiRead(fetchImpl, clock, subscriberId);
+
+    return postRead(fetchImpl, clock, path, operation, { parameters: { ssid_index: ssidIndex, based_on_task_run_id: read.task_run_id } });
 }
 
 /**
@@ -918,14 +941,26 @@ async function onuDiagnose(args, fetchImpl, clock) {
 }
 
 /**
- * `get_task` — `GET /tasks/{id}`.
+ * `get_task` — `GET /tasks/{id}`; with `wait_seconds` it polls until the task is final or the time is up.
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
- * @return {Promise<object>} Task projection, or the failure payload.
+ * @param {object} clock Clock seams (`now`, `sleep`).
+ * @return {Promise<object>} Task projection, `{ status: 'pending', task_run_id }` when it did not finish in time, or the failure payload.
  */
-async function getTask(args, fetchImpl) {
-    return call(fetchImpl, 'GET', `/tasks/${requireId(args, 'task_run_id')}`);
+async function getTask(args, fetchImpl, clock) {
+    const taskRunId = requireId(args, 'task_run_id');
+    const waitSeconds = optInt(args, 'wait_seconds', 0) ?? 0;
+
+    if (waitSeconds > MAX_TASK_WAIT_SECONDS) {
+        fail(invalid(`wait_seconds must be between 0 and ${MAX_TASK_WAIT_SECONDS}.`));
+    }
+
+    if (waitSeconds === 0) {
+        return call(fetchImpl, 'GET', `/tasks/${taskRunId}`);
+    }
+
+    return awaitTask(fetchImpl, taskRunId, { ...clock, timeoutMs: waitSeconds * 1000 });
 }
 
 /**
@@ -945,6 +980,10 @@ async function listOnus(args, fetchImpl) {
             olt_id: optInt(args, 'olt_id'),
             pon_slot: optInt(args, 'pon_slot', 0),
             pon_port: optInt(args, 'pon_port', 0),
+            platform_id: optInt(args, 'platform_id'),
+            product_class: asTrimmedString(args.product_class),
+            firmware: asTrimmedString(args.firmware),
+            offline_only: args.offline_only === true ? 1 : undefined,
             ...pageQuery(args),
         },
     });
@@ -1042,11 +1081,7 @@ async function networkAlerts(args, fetchImpl) {
  * @return {Promise<object>} Public API envelope.
  */
 async function deviceMetrics(args, fetchImpl) {
-    const kind = asTrimmedString(args.kind);
-
-    if (!DEVICE_KINDS.includes(kind)) {
-        fail(invalid(`kind must be one of: ${DEVICE_KINDS.join(', ')}.`));
-    }
+    const kind = requireDeviceKind(args);
 
     const base = `/network/devices/${kind}/${requireId(args, 'device_id')}/metrics`;
 
@@ -1168,6 +1203,206 @@ async function listInvoices(args, fetchImpl) {
     });
 }
 
+/** Windows `subscriber_usage` accepts. */
+const USAGE_WINDOWS = ['24h', '7d', '30d'];
+
+/** Windows `usage_ranking` accepts. */
+const RANKING_WINDOWS = ['24h', '7d'];
+
+/** `live_traffic` re-asks while the router watch starts: this many POSTs, this far apart. */
+const LIVE_TRAFFIC_ATTEMPTS = 5;
+const LIVE_TRAFFIC_INTERVAL_MS = 2000;
+
+/**
+ * Read an optional enum argument.
+ *
+ * @param {object} args Tool arguments.
+ * @param {string} key Argument name.
+ * @param {string[]} allowed Accepted values.
+ * @return {string|undefined} The value, or undefined when absent.
+ */
+function optEnum(args, key, allowed) {
+    if (!isPresent(args[key])) {
+        return undefined;
+    }
+
+    if (!allowed.includes(args[key])) {
+        fail(invalid(`${key} must be one of: ${allowed.join(', ')}.`));
+    }
+
+    return args[key];
+}
+
+/**
+ * Read an optional `limit` argument capped at `max`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {number} max Largest accepted value.
+ * @return {number|undefined} The limit, or undefined when absent.
+ */
+function optLimit(args, max) {
+    const limit = optInt(args, 'limit');
+
+    if (limit !== undefined && limit > max) {
+        fail(invalid(`limit must be at most ${max}.`));
+    }
+
+    return limit;
+}
+
+/**
+ * @param {object} args Tool arguments.
+ * @return {string} The `kind` argument, one of {@link DEVICE_KINDS}.
+ */
+function requireDeviceKind(args) {
+    const kind = asTrimmedString(args.kind);
+
+    if (!DEVICE_KINDS.includes(kind)) {
+        fail(invalid(`kind must be one of: ${DEVICE_KINDS.join(', ')}.`));
+    }
+
+    return kind;
+}
+
+/**
+ * `list_onu_models` — `GET /network/onu-models`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function listOnuModels(args, fetchImpl) {
+    return call(fetchImpl, 'GET', '/network/onu-models', { query: { platform_id: optInt(args, 'platform_id') } });
+}
+
+/**
+ * `subscriber_usage` — `GET /subscribers/{id}/usage`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function subscriberUsage(args, fetchImpl) {
+    const span = optEnum(args, 'window', USAGE_WINDOWS);
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'GET', `/subscribers/${subscriberId}/usage`, { query: { window: span } });
+}
+
+/**
+ * `usage_ranking` — `GET /network/usage/ranking`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function usageRanking(args, fetchImpl) {
+    return call(fetchImpl, 'GET', '/network/usage/ranking', {
+        query: {
+            platform_id: optInt(args, 'platform_id'),
+            olt_id: optInt(args, 'olt_id'),
+            pon_slot: optInt(args, 'pon_slot', 0),
+            pon_port: optInt(args, 'pon_port', 0),
+            window: optEnum(args, 'window', RANKING_WINDOWS),
+            order: optEnum(args, 'order', ['asc', 'desc']),
+            limit: optLimit(args, 50),
+        },
+    });
+}
+
+/**
+ * `device_tasks` — the last device tasks of a router/OLT (`kind` + `device_id`) or of a subscriber.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function deviceTasks(args, fetchImpl) {
+    const hasDevice = isPresent(args.kind) || isPresent(args.device_id);
+    const hasSubscriber = isPresent(args.subscriber_id) || asTrimmedString(args.subscriber_query) !== '';
+
+    if (hasDevice === hasSubscriber) {
+        fail(invalid('Provide either kind + device_id, or a subscriber (subscriber_id or subscriber_query).'));
+    }
+
+    const limit = optLimit(args, 50);
+
+    if (hasSubscriber) {
+        return call(fetchImpl, 'GET', `/subscribers/${await resolveSubscriberId(fetchImpl, args)}/tasks`, { query: { limit } });
+    }
+
+    const kind = requireDeviceKind(args);
+
+    return call(fetchImpl, 'GET', `/network/devices/${kind}/${requireId(args, 'device_id')}/tasks`, { query: { limit } });
+}
+
+/**
+ * `get_router` — `GET /network/routers/{id}`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function getRouter(args, fetchImpl) {
+    return call(fetchImpl, 'GET', `/network/routers/${requireId(args, 'router_id')}`);
+}
+
+/**
+ * `olt_poll_runs` — `GET /network/olts/{id}/poll-runs`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function oltPollRuns(args, fetchImpl) {
+    return call(fetchImpl, 'GET', `/network/olts/${requireId(args, 'olt_id')}/poll-runs`, { query: { limit: optInt(args, 'limit') } });
+}
+
+/**
+ * `list_eoc_masters` — `GET /network/eoc-masters`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function listEocMasters(args, fetchImpl) {
+    return call(fetchImpl, 'GET', '/network/eoc-masters', { query: { platform_id: optInt(args, 'platform_id') } });
+}
+
+/**
+ * `live_traffic` — `POST /subscribers/{id}/live-traffic`. The first call only starts the router watch (202; its task never carries the
+ * sample), so it asks again every 2 s, up to 5 times, until the API answers 200 with the sample.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {object} clock Clock seams (`now`, `sleep`).
+ * @return {Promise<object>} Public API envelope, or `{ status: 'pending', task_run_id }` when no sample arrived.
+ */
+async function liveTraffic(args, fetchImpl, clock) {
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+    let taskRunId = null;
+
+    for (let attempt = 1; attempt <= LIVE_TRAFFIC_ATTEMPTS; attempt += 1) {
+        const response = await apiRequest(fetchImpl, 'POST', `/subscribers/${subscriberId}/live-traffic`, { body: {} });
+
+        if (isFailure(response)) {
+            return apiFailurePayload(response);
+        }
+
+        if (response.status !== 202) {
+            return response.body;
+        }
+
+        taskRunId = asPositiveInt(response.body?.task_run_id ?? response.body?.data?.task_run_id) ?? taskRunId;
+
+        if (attempt < LIVE_TRAFFIC_ATTEMPTS) {
+            await clock.sleep(LIVE_TRAFFIC_INTERVAL_MS);
+        }
+    }
+
+    return { status: 'pending', task_run_id: taskRunId, message: 'The live watch is still starting and has no sample yet; call live_traffic again in a few seconds.' };
+}
+
 // ─── Write handlers ──────────────────────────────────────────────────────────
 
 /** Service scopes of a disconnect/reconnect. */
@@ -1191,6 +1426,21 @@ function requireScope(args) {
 }
 
 /**
+ * POST a write and wait for the device task it dispatches (an answer without a task is returned as is).
+ *
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {object} clock Clock seams (`now`, `sleep`).
+ * @param {string} path Endpoint below `/api/v1/public`.
+ * @param {object} body JSON body.
+ * @param {string} idempotencyKey Replay token.
+ * @param {number} [timeoutMs] Polling budget (the 40 s default when omitted).
+ * @return {Promise<object>} Final task projection, or the failure payload.
+ */
+async function postWrite(fetchImpl, clock, path, body, idempotencyKey, timeoutMs) {
+    return awaitDispatched(fetchImpl, clock, await apiRequest(fetchImpl, 'POST', path, { body, idempotencyKey }), timeoutMs);
+}
+
+/**
  * Dispatch one ONU write and wait for its task.
  *
  * @param {Function} fetchImpl `fetch`-compatible implementation.
@@ -1199,15 +1449,42 @@ function requireScope(args) {
  * @param {string} idempotencyKey Replay token.
  * @param {string} operation Write operation.
  * @param {object} parameters Operation parameters.
+ * @param {number} [timeoutMs] Polling budget (the 40 s default when omitted).
  * @return {Promise<object>} Final task projection, or the failure payload.
  */
-async function onuAction(fetchImpl, clock, subscriberId, idempotencyKey, operation, parameters) {
-    const response = await apiRequest(fetchImpl, 'POST', `/subscribers/${subscriberId}/onu/actions`, {
-        body: { operation, parameters },
-        idempotencyKey,
-    });
+async function onuAction(fetchImpl, clock, subscriberId, idempotencyKey, operation, parameters, timeoutMs) {
+    return postWrite(fetchImpl, clock, `/subscribers/${subscriberId}/onu/actions`, { operation, parameters }, idempotencyKey, timeoutMs);
+}
 
-    return awaitDispatched(fetchImpl, clock, response);
+/**
+ * Build the handler of a write `POST /subscribers/{id}<suffix>`: idempotency key and body are validated before any HTTP call,
+ * then the subscriber is resolved, the request sent and its task awaited.
+ *
+ * @param {string} suffix Path suffix below the subscriber.
+ * @param {number} [timeoutMs] Polling budget (the 40 s default when omitted).
+ * @param {Function} [buildBody] Validates the arguments and returns the JSON body (`{}` by default).
+ * @return {Function} Tool handler.
+ */
+function subscriberWrite(suffix, timeoutMs, buildBody = () => ({})) {
+    return async (args, fetchImpl, clock) => {
+        const idempotencyKey = requireIdempotencyKey(args);
+        const body = buildBody(args);
+        const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+        return postWrite(fetchImpl, clock, `/subscribers/${subscriberId}${suffix}`, body, idempotencyKey, timeoutMs);
+    };
+}
+
+/**
+ * Build the handler of an ONU write sent through `POST /subscribers/{id}/onu/actions`.
+ *
+ * @param {string} operation Write operation.
+ * @param {number} [timeoutMs] Polling budget (the 40 s default when omitted).
+ * @param {Function} [buildParameters] Validates the arguments and returns the operation parameters (`{}` by default).
+ * @return {Function} Tool handler.
+ */
+function onuActionHandler(operation, timeoutMs, buildParameters = () => ({})) {
+    return subscriberWrite('/onu/actions', timeoutMs, (args) => ({ operation, parameters: buildParameters(args) }));
 }
 
 /**
@@ -1232,20 +1509,8 @@ async function requireWifiRead(fetchImpl, clock, subscriberId) {
     return fail(read ?? { error: 'wifi_read_failed', message: 'The WiFi read returned no result; nothing was written.' });
 }
 
-/**
- * `reboot_onu` — `POST /subscribers/{id}/onu/actions` with `onu.reboot`.
- *
- * @param {object} args Tool arguments.
- * @param {Function} fetchImpl `fetch`-compatible implementation.
- * @param {object} clock Clock seams (`now`, `sleep`).
- * @return {Promise<object>} Final task projection, or the failure payload.
- */
-async function rebootOnu(args, fetchImpl, clock) {
-    const idempotencyKey = requireIdempotencyKey(args);
-    const subscriberId = await resolveSubscriberId(fetchImpl, args);
-
-    return onuAction(fetchImpl, clock, subscriberId, idempotencyKey, 'onu.reboot', {});
-}
+/** `reboot_onu` — `onu.reboot` through `POST /subscribers/{id}/onu/actions`; the ONU takes over a minute to come back. */
+const rebootOnu = onuActionHandler('onu.reboot', LONG_TASK_TIMEOUT_MS);
 
 /**
  * `set_onu_catv` — `onu.catv_update` through `POST /subscribers/{id}/onu/actions`.
@@ -1343,21 +1608,8 @@ async function changeWifiRadio(args, fetchImpl, clock) {
     return onuAction(fetchImpl, clock, subscriberId, idempotencyKey, 'onu.wifi_radio_update', parameters);
 }
 
-/**
- * `sync_onu` — `POST /subscribers/{id}/onu/sync`, then waits for the task.
- *
- * @param {object} args Tool arguments.
- * @param {Function} fetchImpl `fetch`-compatible implementation.
- * @param {object} clock Clock seams (`now`, `sleep`).
- * @return {Promise<object>} Final task projection, or the failure payload.
- */
-async function syncOnu(args, fetchImpl, clock) {
-    const idempotencyKey = requireIdempotencyKey(args);
-    const subscriberId = await resolveSubscriberId(fetchImpl, args);
-    const response = await apiRequest(fetchImpl, 'POST', `/subscribers/${subscriberId}/onu/sync`, { body: {}, idempotencyKey });
-
-    return awaitDispatched(fetchImpl, clock, response);
-}
+/** `sync_onu` — `POST /subscribers/{id}/onu/sync`, then waits for the task. */
+const syncOnu = subscriberWrite('/onu/sync', LONG_TASK_TIMEOUT_MS);
 
 /**
  * `change_subscriber_plan` — `POST /subscribers/{id}/plan`.
@@ -1424,6 +1676,178 @@ async function createWorkOrder(args, fetchImpl) {
 
     return call(fetchImpl, 'POST', '/work-orders', { body, idempotencyKey });
 }
+
+/**
+ * Parameters of `olt.onu_admin_state`.
+ *
+ * @param {object} args Tool arguments.
+ * @return {{ admin_state: string }}
+ */
+function adminStateParameters(args) {
+    if (!['enable', 'disable'].includes(args.admin_state)) {
+        fail(invalid('admin_state must be enable or disable.'));
+    }
+
+    return { admin_state: args.admin_state };
+}
+
+/**
+ * Parameters of `onu.factory_reset`: the operator's explicit confirmation, passed as the literal text.
+ *
+ * @param {object} args Tool arguments.
+ * @return {{ confirm: string }}
+ */
+function factoryResetParameters(args) {
+    if (args.confirm !== 'factory_reset') {
+        fail(invalid('confirm must be exactly "factory_reset", and only after the operator explicitly confirmed the factory reset of the ONU.'));
+    }
+
+    return { confirm: 'factory_reset' };
+}
+
+/**
+ * Parameters of `onu.wifi_optimize`: `preview` carries nothing else, `apply` the plan the preview returned.
+ *
+ * @param {object} args Tool arguments.
+ * @return {object}
+ */
+function wifiOptimizeParameters(args) {
+    if (!['preview', 'apply'].includes(args.mode)) {
+        fail(invalid('mode must be preview or apply.'));
+    }
+
+    if (args.mode === 'preview') {
+        if (isPresent(args.plan)) {
+            fail(invalid('plan is only allowed with mode apply.'));
+        }
+
+        return { mode: 'preview' };
+    }
+
+    if (!Array.isArray(args.plan) || args.plan.length === 0 || !args.plan.every(isPlainObject)) {
+        fail(invalid('plan is required with mode apply: the result.plan items of the preview, unchanged.'));
+    }
+
+    return { mode: 'apply', plan: args.plan };
+}
+
+/**
+ * Require the MAC of an ONU: 12 hexadecimal characters, separators allowed. Sent as typed; the API normalizes it.
+ *
+ * @param {object} args Tool arguments.
+ * @return {string} The MAC.
+ */
+function requireMac(args) {
+    const mac = asTrimmedString(args.mac);
+
+    if (!/^[0-9a-f]{12}$/i.test(mac.replace(/[\s:.-]/g, ''))) {
+        fail(invalid('mac is required: 12 hexadecimal characters (separators allowed).'));
+    }
+
+    return mac;
+}
+
+/**
+ * Body of `POST /subscribers/{id}/onu/swap`.
+ *
+ * @param {object} args Tool arguments.
+ * @return {object}
+ */
+function swapBody(args) {
+    const networkOnuId = requireId(args, 'network_onu_id');
+    const serial = asTrimmedString(args.serial);
+
+    if (serial === '') {
+        fail(invalid('serial is required: the serial of the match found by locate_new_onu.'));
+    }
+
+    const body = { network_onu_id: networkOnuId, serial, mac: requireMac(args) };
+
+    for (const field of ['ssid_24', 'ssid_5']) {
+        if (asTrimmedString(args[field]) !== '') {
+            body[field] = asTrimmedString(args[field]);
+        }
+    }
+
+    if (isPresent(args.wifi_password)) {
+        body.wifi_password = args.wifi_password;
+    }
+
+    if (typeof args.keep_password === 'boolean') {
+        body.keep_password = args.keep_password;
+    }
+
+    return body;
+}
+
+/**
+ * `locate_new_onu` — `POST /subscribers/{id}/onu/swap/locate` dispatches one search task per OLT; waits for all of them
+ * and merges their `result.matches`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {object} clock Clock seams (`now`, `sleep`).
+ * @return {Promise<object>} `{ success, matches, olts, errors }`, or the failure payload.
+ */
+async function locateNewOnu(args, fetchImpl, clock) {
+    const idempotencyKey = requireIdempotencyKey(args);
+    const mac = requireMac(args);
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+    const response = await apiRequest(fetchImpl, 'POST', `/subscribers/${subscriberId}/onu/swap/locate`, { body: { mac }, idempotencyKey });
+
+    if (isFailure(response)) {
+        return apiFailurePayload(response);
+    }
+
+    const data = response.body?.data ?? response.body;
+    const dispatched = Array.isArray(data?.tasks) ? data.tasks : [];
+    const finished = await Promise.all(dispatched.map((task) => awaitTask(fetchImpl, task.task_run_id, clock)));
+    const matches = [];
+    const olts = dispatched.map((task, index) => {
+        const done = finished[index];
+
+        for (const match of Array.isArray(done.result?.matches) ? done.result.matches : []) {
+            matches.push({ olt_id: task.olt_id, olt_name: task.olt_name, ...match });
+        }
+
+        return {
+            olt_id: task.olt_id,
+            olt_name: task.olt_name,
+            task_run_id: task.task_run_id,
+            status: done.status ?? null,
+            error_code: done.error_code ?? done.error?.code ?? null,
+        };
+    });
+
+    return {
+        success: true,
+        matches,
+        olts,
+        errors: Array.isArray(data?.errors) ? data.errors : [],
+        ...(data?.replayed === undefined ? {} : { replayed: data.replayed }),
+    };
+}
+
+/** `set_onu_admin_state` — `olt.onu_admin_state` through `POST /subscribers/{id}/onu/actions`. */
+const setOnuAdminState = onuActionHandler('olt.onu_admin_state', undefined, adminStateParameters);
+
+/** `factory_reset_onu` — `onu.factory_reset`; the ONU is wiped and rebooted. */
+const factoryResetOnu = onuActionHandler('onu.factory_reset', LONG_TASK_TIMEOUT_MS, factoryResetParameters);
+
+/** `optimize_wifi` — `onu.wifi_optimize`; `preview` is a pure read of the plan. */
+const optimizeWifi = onuActionHandler('onu.wifi_optimize', undefined, wifiOptimizeParameters);
+
+/** `restore_wifi` — `onu.wifi_restore`. */
+const restoreWifi = onuActionHandler('onu.wifi_restore');
+
+/** `reprovision_onu` — `POST /subscribers/{id}/onu/provision` (mode reprovision). */
+const reprovisionOnu = subscriberWrite('/onu/provision', LONG_TASK_TIMEOUT_MS);
+
+/** `kick_pppoe` — `POST /subscribers/{id}/pppoe/kick`; answers synchronously. */
+const kickPppoe = subscriberWrite('/pppoe/kick');
+
+/** `swap_onu` — `POST /subscribers/{id}/onu/swap`. */
+const swapOnu = subscriberWrite('/onu/swap', LONG_TASK_TIMEOUT_MS, swapBody);
 
 // ─── Tool catalogue ──────────────────────────────────────────────────────────
 
@@ -1542,9 +1966,10 @@ const TOOLS = [
     readTool(
         'diagnose_subscriber',
         'Diagnosticar abonado',
-        'One-call diagnosis of a subscriber: subscriber, billing (open_cutoff, overdue_invoices, outstanding_cents), onu (state and last '
-        + 'optical reading), network_context (PPPoE session, last 24 h), consumption, activity and open work orders. A section that cannot be built '
-        + 'is null and listed in section_errors; null means "no disponible", never 0.',
+        'One-call diagnosis of a subscriber (kept small): subscriber, billing (open_cutoff, overdue_invoices, outstanding_cents), onu (state and last '
+        + 'optical reading with the last 12 samples and their min/avg/max), network_context (PPPoE session, last 24 h; PON and uplink traffic come as summarised series '
+        + '{state, series: [{name, unit, last, min, avg, max, last_at, points}]}), consumption (at most 5 recent entries; use subscriber_usage for bytes), activity and open work orders. '
+        + 'A section that cannot be built is null and listed in section_errors; null means "no disponible", never 0.',
         SUBSCRIBER_PROPERTIES,
         diagnoseSubscriber,
     ),
@@ -1553,12 +1978,13 @@ const TOOLS = [
         'Leer ONU',
         'Read the subscriber\'s ONU through a device task and wait up to 40 s for the result. It does not change the equipment. Returns the '
         + 'final task projection ({success, status, task_run_id, error_code, message, result}); when the task is still running it returns '
-        + '{status: "pending", task_run_id}: follow it with get_task. Operations: olt.onu_details_read, olt.onu_health_check, onu.tr069_read '
-        + '(parameters {refresh: boolean}), onu.wan_read, onu.wifi_read, onu.catv_read, onu.wifi_diagnose.',
+        + '{status: "pending", task_run_id}: follow it with get_task (wait_seconds). Operations: olt.onu_details_read, olt.onu_health_check, onu.tr069_read '
+        + '(parameters {refresh: boolean}), onu.wan_read, onu.wifi_read, onu.catv_read, onu.wifi_diagnose, onu.wifi_password_check (parameters {ssid_index}; '
+        + 'reads the ONU WiFi first and answers result.match true, false or "unreadable"; password_unknown when CloudISP has no password on record for that network).',
         {
             ...SUBSCRIBER_PROPERTIES,
             operation: { type: 'string', enum: ONU_READ_OPERATIONS, description: 'ONU read operation.' },
-            parameters: { type: 'object', description: 'Operation parameters; only onu.tr069_read takes one ({refresh: boolean}).' },
+            parameters: { type: 'object', description: 'Operation parameters: onu.tr069_read takes {refresh: boolean}; onu.wifi_password_check requires {ssid_index} (1 to 8).' },
         },
         onuRead,
         ['operation'],
@@ -1574,22 +2000,32 @@ const TOOLS = [
     readTool(
         'get_task',
         'Estado de una tarea',
-        'Current status of a device task (task_run_id from onu_read, olt_read, router_read or an ONU write): status pending, running, succeeded, failed or canceled, plus the safe result.',
-        { task_run_id: { type: 'integer', description: 'Task run id.' } },
+        'Current status of a device task (task_run_id from onu_read, olt_read, router_read or an ONU write): status pending, running, succeeded, failed or canceled, plus the safe result. '
+        + 'With wait_seconds it polls until the task finishes (or the time is up, then {status: "pending"}): use it after a pending answer instead of asking the user to check later. '
+        + 'A succeeded task whose result carries an error comes back as outcome device_error.',
+        {
+            task_run_id: { type: 'integer', description: 'Task run id.' },
+            wait_seconds: { type: 'integer', description: 'Seconds to wait for the task to finish, 0 to 110 (default 0: answer now).' },
+        },
         getTask,
         ['task_run_id'],
     ),
     readTool(
         'list_onus',
         'Listar ONUs',
-        'List ONUs of the visible platforms, optionally filtered by state (online, offline, los, absent...), subscriber, OLT or PON. Each row carries '
-        + 'olt, pon_slot, pon_port, state, client_id and last_seen_at. meta.total is the full count: use per_page=1 to only count.',
+        'List ONUs of the visible platforms, optionally filtered by state (online, offline, los, absent...), subscriber, OLT, PON, platform, model (product_class) or firmware, '
+        + 'or only the offline ones. Each row carries olt, pon_slot, pon_port, state, client_id, last_seen_at, offline_since, acs {product_class, firmware, adapter, sync_template, '
+        + 'last_inform_at, wifi_channel_24, wifi_channel_5} (null when the ONU has no ACS data) and client {id, name}. meta.total is the full count: use per_page=1 to only count.',
         {
             state: { type: 'string', description: 'ONU state filter, e.g. online, offline, los.' },
             ...SUBSCRIBER_PROPERTIES,
             olt_id: { type: 'integer', description: 'Only ONUs of this OLT.' },
             pon_slot: { type: 'integer', description: 'Only ONUs of this PON slot (combine with olt_id and pon_port).' },
             pon_port: { type: 'integer', description: 'Only ONUs of this PON port (combine with olt_id and pon_slot).' },
+            platform_id: { type: 'integer', description: 'Only ONUs of this platform (2, 3, 4 or 15 for NVS).' },
+            product_class: { type: 'string', description: 'Exact model (ACS product_class), case-insensitive, as listed by list_onu_models.' },
+            firmware: { type: 'string', description: 'Exact firmware version, case-insensitive, as listed by list_onu_models.' },
+            offline_only: { type: 'boolean', description: 'Only offline ONUs.' },
             page: { type: 'integer', description: 'Page number, from 1.' },
             per_page: { type: 'integer', description: 'Rows per page (API maximum 100).' },
         },
@@ -1767,17 +2203,100 @@ const TOOLS = [
     readTool(
         'network_snapshot',
         'Estado de red',
-        'Latest online PPP session count and WAN throughput in Mbps for the credential platform, plus their collection '
-        + 'timestamps. This is not a 24-hour consumption report and not a saturation percentage; usage_24h.available is '
-        + 'always false because RADIUS accounting is not exposed.',
-        {},
+        'Latest online PPP session count and WAN throughput in Mbps, plus their collection timestamps. Without platform_id it aggregates every visible platform '
+        + 'and lists them in platforms[]; with platform_id (2, 3, 4 or 15 for NVS) only that one. This is not a 24-hour consumption report and not a saturation '
+        + 'percentage (use usage_ranking / subscriber_usage for traffic); usage_24h.available is always false because RADIUS accounting is not exposed here.',
+        { platform_id: { type: 'integer', description: 'Only this platform; default all visible platforms.' } },
         networkSnapshot,
+    ),
+    readTool(
+        'list_onu_models',
+        'Modelos de ONU',
+        'ONU fleet grouped by model and firmware, from the ACS observations: [{product_class, firmware, sync_template, onus, online, offline}]. '
+        + 'Use it to answer "how many ONUs of model X / firmware Y"; then list_onus with product_class and firmware gives the subscribers.',
+        { platform_id: { type: 'integer', description: 'Only this platform (2, 3, 4 or 15 for NVS); default all visible platforms.' } },
+        listOnuModels,
+    ),
+    readTool(
+        'subscriber_usage',
+        'Consumo del abonado',
+        'PPPoE usage of one subscriber over a window (default 24h): download_bytes, upload_bytes, peak_download_bps, peak_upload_bps, last_sample_at and up to 48 '
+        + 'buckets {t, down_bytes, up_bytes}. null with a reason when there are no samples; never 0.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            window: { type: 'string', enum: USAGE_WINDOWS, description: 'Window: 24h (default), 7d or 30d.' },
+        },
+        subscriberUsage,
+    ),
+    readTool(
+        'usage_ranking',
+        'Ranking de consumo',
+        'Ranking of subscribers by PPPoE usage over a window, least traffic first (order asc) or most (desc, default). Rows {client_id, name, platform_id, olt_id, pon_slot, pon_port, '
+        + 'download_bytes, upload_bytes}; subscribers without samples are listed apart in no_data and are not "zero traffic".',
+        {
+            platform_id: { type: 'integer', description: 'Only this platform.' },
+            olt_id: { type: 'integer', description: 'Only subscribers behind this OLT.' },
+            pon_slot: { type: 'integer', description: 'Only this PON slot (combine with olt_id and pon_port).' },
+            pon_port: { type: 'integer', description: 'Only this PON port (combine with olt_id and pon_slot).' },
+            window: { type: 'string', enum: RANKING_WINDOWS, description: 'Window: 24h or 7d.' },
+            order: { type: 'string', enum: ['asc', 'desc'], description: 'asc = least traffic first.' },
+            limit: { type: 'integer', description: 'Rows to return (at most 50).' },
+        },
+        usageRanking,
+    ),
+    readTool(
+        'device_tasks',
+        'Tareas del dispositivo',
+        'The last device tasks (at most 50) of a router or OLT (kind + device_id) or of a subscriber (its ONU and router): {id, task_type, device_kind, status, error_type, '
+        + 'error_message, created_at, finished_at}. Never the payload or the result: use get_task for those. Provide either kind + device_id or a subscriber.',
+        {
+            kind: { type: 'string', enum: DEVICE_KINDS, description: 'Device kind; with device_id.' },
+            device_id: { type: 'integer', description: 'Router or OLT id; with kind.' },
+            ...SUBSCRIBER_PROPERTIES,
+            limit: { type: 'integer', description: 'Tasks to return (at most 50).' },
+        },
+        deviceTasks,
+    ),
+    readTool(
+        'get_router',
+        'Ver router',
+        'One router: its last 20 health checks (status, rtt, icmp, cpu/mem when known), circuit-breaker state and WAN capacity. Host credentials are never exposed.',
+        { router_id: { type: 'integer', description: 'Router id from list_routers.' } },
+        getRouter,
+        ['router_id'],
+    ),
+    readTool(
+        'olt_poll_runs',
+        'Sondeos de OLT',
+        'The last polls of an OLT (status, started/finished, error) and, when known, its current PON status.',
+        {
+            olt_id: { type: 'integer', description: 'OLT id from list_olts.' },
+            limit: { type: 'integer', description: 'Poll runs to return.' },
+        },
+        oltPollRuns,
+        ['olt_id'],
+    ),
+    readTool(
+        'list_eoc_masters',
+        'Masters EoC',
+        'EoC masters (La Merced): id, name, platform, status / last seen and counted CPEs. Credentials are never exposed; masters are read-only for the agent.',
+        { platform_id: { type: 'integer', description: 'Only this platform; default all visible platforms.' } },
+        listEocMasters,
+    ),
+    readTool(
+        'live_traffic',
+        'Tráfico en vivo',
+        'Live traffic of the subscriber\'s PPPoE session, read from the router: {download_bps, upload_bps, sampled_at, source}. It starts a short watch of the session and retries '
+        + 'for about 10 s until the first sample; if none arrives it answers {status: "pending"} and you may call it again. It does not change the equipment. '
+        + 'Report download_bps and upload_bps (the router-side rx/tx are the other way round).',
+        SUBSCRIBER_PROPERTIES,
+        liveTraffic,
     ),
     writeTool(
         'reboot_onu',
         'Reiniciar ONU',
-        'Reboot the subscriber\'s ONU. The subscriber loses service for a few minutes. Waits up to 40 s and returns the task projection; if it failed, '
-        + 'offer a technical-visit work order (create_work_order).',
+        'Reboot the subscriber\'s ONU. The subscriber loses service for a few minutes. Waits up to 110 s (a reboot takes over a minute) and returns the task projection; '
+        + 'if it failed, or the ONU never came back (outcome device_error, e.g. onu_offline or restart_not_observed), offer a technical-visit work order (create_work_order).',
         SUBSCRIBER_PROPERTIES,
         [],
         rebootOnu,
@@ -1832,7 +2351,7 @@ const TOOLS = [
         'sync_onu',
         'Sincronizar ONU',
         'Sync (re-provision) the subscriber\'s linked ONU with its expected configuration. Run onu_diagnose first and offer this only when it detects a missing or wrong '
-        + 'channel. Waits up to 40 s and returns the task projection; sync_template_missing means the model is not adapted.',
+        + 'channel. Waits up to 110 s and returns the task projection; sync_template_missing means the model is not adapted.',
         SUBSCRIBER_PROPERTIES,
         [],
         syncOnu,
@@ -1924,6 +2443,108 @@ const TOOLS = [
         [],
         assignWorkOrder,
     ),
+    writeTool(
+        'set_onu_admin_state',
+        'Estado administrativo de la ONU',
+        'Enable or disable the subscriber\'s ONU on the OLT (olt.onu_admin_state). Disabling cuts the subscriber\'s service until the ONU is enabled again. '
+        + 'Waits up to 40 s and returns the task projection.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            admin_state: { type: 'string', enum: ['enable', 'disable'], description: 'Target administrative state.' },
+        },
+        ['admin_state'],
+        setOnuAdminState,
+    ),
+    writeTool(
+        'factory_reset_onu',
+        'Restablecer ONU de fábrica',
+        'Factory-reset the subscriber\'s ONU: it loses its WAN, WiFi and TR-069 configuration and the subscriber has no service until reprovision_onu runs. '
+        + 'Last resort; the operator must confirm it explicitly and you must pass confirm "factory_reset". Waits up to 110 s and returns the task projection.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            confirm: { type: 'string', enum: ['factory_reset'], description: 'The literal text factory_reset, only after the operator explicitly confirmed this action.' },
+        },
+        ['confirm'],
+        factoryResetOnu,
+        true,
+    ),
+    writeTool(
+        'optimize_wifi',
+        'Optimizar WiFi',
+        'Optimize the WiFi channel, width and power of the subscriber\'s ONU (onu.wifi_optimize); SSID, password, security and visibility are never touched. '
+        + 'mode preview only computes the plan (result.plan, at most 8 items {control, band, from, to}) and NEVER changes the equipment: run it first and show the plan. '
+        + 'mode apply writes the plan: pass result.plan back unchanged as plan, after the operator confirmed it. Waits up to 40 s and returns the task projection.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            mode: { type: 'string', enum: ['preview', 'apply'], description: 'preview computes the plan and changes nothing; apply writes the plan.' },
+            plan: {
+                type: 'array',
+                items: { type: 'object', description: '{control, band, from, to} item of the preview plan.' },
+                description: 'Required with apply: result.plan of the preview, unchanged. Not allowed with preview.',
+            },
+        },
+        ['mode'],
+        optimizeWifi,
+    ),
+    writeTool(
+        'restore_wifi',
+        'Restaurar WiFi',
+        'Write the WiFi CloudISP has on record for the subscriber (SSID, security and password per band) back onto the ONU (onu.wifi_restore), '
+        + 'e.g. when the ONU lost or changed it. Waits up to 40 s and returns the task projection.',
+        SUBSCRIBER_PROPERTIES,
+        [],
+        restoreWifi,
+    ),
+    writeTool(
+        'reprovision_onu',
+        'Reaprovisionar ONU',
+        'Re-provision the subscriber\'s linked ONU (onu.provision, mode reprovision): replays the desired PPPoE WAN, management WAN, TR-069 client, WiFi and CATV onto it, '
+        + 'e.g. after a factory reset. The subscriber may lose service briefly. Waits up to 110 s and returns the task projection.',
+        SUBSCRIBER_PROPERTIES,
+        [],
+        reprovisionOnu,
+    ),
+    writeTool(
+        'kick_pppoe',
+        'Cerrar sesión PPPoE',
+        'Close the subscriber\'s active PPPoE session so the router drops it and the CPE reconnects (a short interruption). Answers {outcome: "disconnected"}; '
+        + 'no_active_session when there is no session; kick_unavailable when the RADIUS server cannot do it.',
+        SUBSCRIBER_PROPERTIES,
+        [],
+        kickPppoe,
+        true,
+    ),
+    writeTool(
+        'locate_new_onu',
+        'Ubicar ONU nueva',
+        'First step of an ONU swap: find the replacement ONU by its MAC on the OLTs of the subscriber\'s platform. Waits up to 40 s for every OLT and returns '
+        + '{matches: [{olt_id, olt_name, network_onu_id, serial, pon_slot, pon_port, onu_index, model, state, linked_client_id}], olts, errors}. '
+        + 'Pass network_onu_id and serial of the match to swap_onu. It reads the OLTs only.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            mac: { type: 'string', description: 'MAC of the new ONU: 12 hexadecimal characters, separators allowed.' },
+        },
+        ['mac'],
+        locateNewOnu,
+    ),
+    writeTool(
+        'swap_onu',
+        'Cambiar ONU',
+        'Swap the subscriber\'s ONU for the new one found by locate_new_onu: provisions it with the subscriber\'s PPPoE/management/WiFi configuration and relinks the subscriber. '
+        + 'The subscriber loses service while it happens. Waits up to 110 s and returns the task projection. Refusals: invalid_mac, onu_not_found, onu_serial_mismatch, onu_mac_mismatch.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            network_onu_id: { type: 'integer', description: 'network_onu_id of the match found by locate_new_onu.' },
+            serial: { type: 'string', description: 'serial of that same match.' },
+            mac: { type: 'string', description: 'MAC of the new ONU, as given to locate_new_onu.' },
+            ssid_24: { type: 'string', description: 'Optional 2.4 GHz network name for the new ONU.' },
+            ssid_5: { type: 'string', description: 'Optional 5 GHz network name for the new ONU.' },
+            wifi_password: { type: 'string', description: 'Optional new WiFi password; never echoed.' },
+            keep_password: { type: 'boolean', description: 'Keep the WiFi password CloudISP has on record for the subscriber.' },
+        },
+        ['network_onu_id', 'serial', 'mac'],
+        swapOnu,
+    ),
 ];
 
 /** Tools that change state; hidden and refused unless `CLOUDISP_ALLOW_WRITES=1`. */
@@ -1944,6 +2565,92 @@ export function listTools(env = process.env) {
         .map(({ name, title, description, inputSchema, annotations }) => ({ name, title, description, inputSchema, annotations }));
 }
 
+// ─── Dates ───────────────────────────────────────────────────────────────────
+
+/** Time zone every date handed to the model is shown in (the API speaks UTC). */
+const DISPLAY_TIME_ZONE = 'America/Argentina/Salta';
+
+/** ISO 8601 instant with an explicit zone: `Z`, `+00:00`, `-0300`, `+00`. Group 1 is the zone. */
+const ZONED_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}(?::?\d{2})?)$/;
+
+/** `YYYY-MM-DD HH:MM:SS`: how the database serializes a timestamp without a zone, always UTC. */
+const NAIVE_UTC_DATE_PATTERN = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/;
+
+const DISPLAY_FORMAT = new Intl.DateTimeFormat('en-US', {
+    timeZone: DISPLAY_TIME_ZONE,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+});
+
+/**
+ * Convert a date string of the API to `America/Argentina/Salta` (`YYYY-MM-DDTHH:MM:SS-03:00`).
+ *
+ * Converts an ISO 8601 instant with a zone, and `YYYY-MM-DD HH:MM:SS` (no zone = UTC). Anything else,
+ * including date-only strings and impossible dates, comes back untouched. Fractional seconds are dropped.
+ *
+ * @param {unknown} value Candidate value.
+ * @return {unknown} The converted string, or the value itself.
+ */
+export function toDisplayTime(value) {
+    if (typeof value !== 'string') {
+        return value;
+    }
+
+    let instant;
+    const zoned = ZONED_DATE_PATTERN.exec(value);
+    const naive = NAIVE_UTC_DATE_PATTERN.exec(value);
+
+    if (zoned !== null) {
+        // `Date.parse` only takes `Z` or `+HH:MM`; the API may also send `+00` or `+0000`.
+        const zone = zoned[1].replace(/^([+-]\d{2})(\d{2})$/, '$1:$2').replace(/^([+-]\d{2})$/, '$1:00');
+        instant = Date.parse(value.slice(0, value.length - zoned[1].length) + zone);
+    } else if (naive !== null) {
+        instant = Date.parse(`${naive[1]}T${naive[2]}Z`);
+    } else {
+        return value;
+    }
+
+    // `Date.parse` rolls 2026-02-31 over to March: an impossible day is not a date.
+    const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+
+    if (Number.isNaN(instant) || new Date(Date.UTC(year, month - 1, day)).getUTCDate() !== day) {
+        return value;
+    }
+
+    const parts = Object.fromEntries(DISPLAY_FORMAT.formatToParts(instant).map((part) => [part.type, part.value]));
+    const local = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+    const offsetMinutes = Math.round((local - Math.floor(instant / 1000) * 1000) / 60000);
+    const absolute = Math.abs(offsetMinutes);
+    const zoneName = `${offsetMinutes < 0 ? '-' : '+'}${String(Math.trunc(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
+
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${zoneName}`;
+}
+
+/**
+ * Deep copy of a tool payload with every date string converted by {@link toDisplayTime}.
+ *
+ * @param {unknown} value Payload (or a part of it).
+ * @return {unknown} The converted copy.
+ */
+function localizeDates(value) {
+    if (typeof value === 'string') {
+        return toDisplayTime(value);
+    }
+
+    if (Array.isArray(value)) {
+        return value.map(localizeDates);
+    }
+
+    return isPlainObject(value)
+        ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, localizeDates(item)]))
+        : value;
+}
+
 // ─── Outcomes ────────────────────────────────────────────────────────────────
 
 /** Short Spanish instruction to the model per outcome; anything else gets {@link DEFAULT_HINT}. */
@@ -1955,6 +2662,7 @@ const OUTCOME_HINTS = {
     validation_failed: 'Argumentos inválidos: corregilos o preguntale al usuario; no repitas la misma llamada.',
     wifi_read_pending: 'La lectura no terminó y no se escribió nada; consultá get_task más tarde.',
     task_failed: 'La tarea falló en el equipo: informá el motivo y ofrecé la alternativa (reinicio u OT); no reintentes solo.',
+    device_error: 'La tarea terminó pero el equipo no hizo lo pedido (ver error): informá el motivo y ofrecé la alternativa (reinicio u OT de visita); no reintentes solo.',
 };
 
 /**
@@ -1982,11 +2690,35 @@ function outcomeResult(outcome, message, details, extra = {}) {
 }
 
 /**
+ * The reason a `succeeded` device task did not do what was asked, or `null` when it did.
+ *
+ * The worker finishes the task fine and reports the failure inside the result: an `error` (e.g.
+ * `onu_offline`) or `restart_observed: false` (the ONU never came back from the reboot).
+ *
+ * @param {object} task Task projection.
+ * @return {string|null} Error code, or null.
+ */
+function deviceFailure(task) {
+    if (task.status !== 'succeeded' || !isPlainObject(task.result)) {
+        return null;
+    }
+
+    const { error, restart_observed: restartObserved } = task.result;
+
+    if (error !== undefined && error !== null && error !== '' && error !== false) {
+        return typeof error === 'string' ? error : 'device_error';
+    }
+
+    return restartObserved === false ? 'restart_not_observed' : null;
+}
+
+/**
  * Turn expected domain answers into outcomes so they do not count as tool errors.
  *
  * Outcomes: HTTP 4xx (except 401) and 503 `source_unavailable` carrying an API error code, the
- * MCP's own refusals (validation, ambiguity, writes disabled, WiFi read pending) and failed device
- * tasks. Transport failures, 401, other 5xx, non-JSON answers and unknown tools stay errors.
+ * MCP's own refusals (validation, ambiguity, writes disabled, WiFi read pending), failed device
+ * tasks and `succeeded` tasks whose result reports a device error (see {@link deviceFailure}).
+ * Transport failures, 401, other 5xx, non-JSON answers and unknown tools stay errors.
  *
  * @param {unknown} result Raw tool payload.
  * @return {unknown} The payload, or its outcome form.
@@ -2017,6 +2749,16 @@ function classifyOutcome(result) {
         });
     }
 
+    const deviceError = deviceFailure(result);
+
+    if (deviceError !== null) {
+        return outcomeResult('device_error', result.message, result.result, {
+            error: deviceError,
+            task_run_id: result.task_run_id ?? null,
+            ...(result.replayed === undefined ? {} : { replayed: result.replayed }),
+        });
+    }
+
     return result;
 }
 
@@ -2036,7 +2778,7 @@ function classifyOutcome(result) {
  * @return {Promise<object>} Tool result payload.
  */
 export async function dispatch(name, args, fetchImpl = globalThis.fetch, env = process.env, clock = REAL_CLOCK) {
-    return classifyOutcome(await dispatchRaw(name, args, fetchImpl, env, clock));
+    return localizeDates(classifyOutcome(await dispatchRaw(name, args, fetchImpl, env, clock)));
 }
 
 /**
@@ -2158,7 +2900,9 @@ function toolCallResult(result) {
     const text = JSON.stringify(result, (key, value) => (REDACTED_KEYS.has(key) ? undefined : value), 2);
     // A task still `pending`/`running` carries `success: false` but is not a failure.
     const unfinished = result?.status === 'pending' || result?.status === 'running';
-    const isError = isPlainObject(result) && (typeof result.error === 'string' || (result.success === false && !unfinished));
+    // An outcome (ok:false + outcome) is an expected answer, even when it carries an `error` code (device_error).
+    const outcome = isPlainObject(result) && result.ok === false && typeof result.outcome === 'string';
+    const isError = isPlainObject(result) && !outcome && (typeof result.error === 'string' || (result.success === false && !unfinished));
 
     return { content: [{ type: 'text', text }], isError };
 }

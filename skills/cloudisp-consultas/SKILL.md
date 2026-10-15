@@ -43,9 +43,11 @@ herramientas no modifican nada: no hace falta confirmación.
 
 ## Red — ONUs, OLTs, routers, reportes
 
-- `list_onus` (`state`, `olt_id`, `pon_slot`, `pon_port`, abonado): `meta.total`
-  es el conteo completo; para "cuántas ONUs offline hay" usá `state: offline` y
-  `per_page: 1`.
+- `list_onus` (`state`, `olt_id`, `pon_slot`, `pon_port`, `platform_id`,
+  `product_class`, `firmware`, `offline_only`, abonado): `meta.total` es el
+  conteo completo; para "cuántas ONUs offline hay" usá `state: offline` y
+  `per_page: 1`. Modelos y firmware, consumo y tareas de equipo:
+  `cloudisp-red`.
 - `list_olts` / `get_olt`: OLTs y su resumen por PON (total, online, offline,
   peor RX). `list_routers`: routers con su salud.
 - `network_alerts`, `device_metrics` y `platform_logs`: ver `cloudisp-network-status`.
