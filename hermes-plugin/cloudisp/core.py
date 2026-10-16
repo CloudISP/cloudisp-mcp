@@ -381,6 +381,36 @@ def mcp_server_name() -> str:
         return str(DEFAULT_SETTINGS["mcp_server"])
 
 
+def root_session(session_id: str) -> str:
+    """The id of the conversation a (sub)agent session belongs to: a subagent's id is followed up to the session that delegated to it."""
+    for _ in range(8):
+        parent = _child_sessions.get(session_id)
+
+        if not parent:
+            break
+
+        session_id = parent
+
+    return session_id
+
+
+def conversation_id(session_id: str = "") -> str:
+    """What identifies ONE conversation: the agent's session id, which the runtime renews on `/new` (the session key is per chat and never changes).
+
+    First non-empty of the hook's `session_id` (`agent.session_id`, exact for the call being made), the task-local
+    `HERMES_SESSION_ID` (the gateway clears it at the start of every turn and only republishes it when an agent is built, so on a
+    cached agent it is empty) and, last, `HERMES_SESSION_KEY`. A subagent maps to the session that delegated to it. At most 128
+    printable ASCII characters, so the MCP and the admin store it as is.
+    """
+    for candidate, is_session in ((session_id, True), (get_session_env("HERMES_SESSION_ID", ""), True), (get_session_env("HERMES_SESSION_KEY", ""), False)):
+        value = str(candidate or "").strip()
+
+        if value:
+            return _ascii(root_session(value) if is_session else value, 128)
+
+    return ""
+
+
 def operator_arg(session_id: str = "") -> dict | None:
     """Who is talking, from the session: the hidden `_operator` argument of every MCP call.
 
@@ -397,7 +427,7 @@ def operator_arg(session_id: str = "") -> dict | None:
         "id": user_id,
         "name": get_session_env("HERMES_SESSION_USER_NAME", "") or "",
         "channel": channel,
-        "conversation": get_session_env("HERMES_SESSION_KEY", "") or session_id or "",
+        "conversation": conversation_id(session_id),
         "profile": get_session_env("HERMES_SESSION_PROFILE", "") or "",
     }
 
@@ -456,13 +486,13 @@ def pre_tool_call_identity(tool_name: str = "", args: dict | None = None, sessio
         return fail_closed("identity", tool_name, error)
 
 
-_child_sessions: OrderedDict[str, None] = OrderedDict()
+_child_sessions: OrderedDict[str, str] = OrderedDict()  # subagent session id -> the session id that delegated to it
 _MAX_CHILD_SESSIONS = 1000
 
 
-def on_subagent_start(child_session_id: str | None = None, **_: Any) -> None:
+def on_subagent_start(child_session_id: str | None = None, parent_session_id: str | None = None, **_: Any) -> None:
     if child_session_id:
-        _child_sessions[str(child_session_id)] = None
+        _child_sessions[str(child_session_id)] = str(parent_session_id or "")
 
         while len(_child_sessions) > _MAX_CHILD_SESSIONS:
             _child_sessions.popitem(last=False)
@@ -602,7 +632,7 @@ def build_usage_event(kw: dict) -> dict | None:
         "provider": str(kw.get("provider") or "unknown"),
         **tokens,
     }
-    conversation = _ascii(get_session_env("HERMES_SESSION_KEY", "") or session_id, 128)
+    conversation = conversation_id(session_id)
     user_id = get_session_env("HERMES_SESSION_USER_ID", "")
     platform = get_session_env("HERMES_SESSION_PLATFORM", "") or "cli"
     operator_ref = f"{platform}:{user_id}" if user_id else ""

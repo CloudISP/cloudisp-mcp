@@ -263,7 +263,7 @@ API (lecturas, polling y escrituras) llevan:
 | `X-CloudISP-Operator-Id` | `<canal>:<id>`, por ejemplo `telegram:941533777` |
 | `X-CloudISP-Requested-By` | nombre visible, sin acentos, hasta 120 caracteres (si falta, el `<canal>:<id>`) |
 | `X-CloudISP-Channel` | `telegram`, `cli` o `api` (otro canal no se envía) |
-| `X-CloudISP-Conversation` | referencia de la conversación, hasta 128 caracteres imprimibles |
+| `X-CloudISP-Conversation` | referencia de la conversación, hasta 128 caracteres imprimibles (el plugin de Hermes manda el id de sesión del agente, que cambia con `/new`) |
 | `X-CloudISP-Tool` | nombre de la herramienta |
 
 El admin los guarda en `api_request_log` y en `safe_facts.agent` de cada cambio.

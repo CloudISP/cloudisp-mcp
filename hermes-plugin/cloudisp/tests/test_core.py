@@ -165,7 +165,7 @@ def test_every_mcp_call_gets_the_operator_of_the_session(env, session):
 
     assert directive == {"action": "modify", "args": {"_operator": {
         "id": "941533777", "name": "Mario Santos", "channel": "telegram",
-        "conversation": "agent:main:telegram:dm:941533777", "profile": "cloudisp-nvs",
+        "conversation": "sess-1", "profile": "cloudisp-nvs",
     }}}
 
 
@@ -177,13 +177,93 @@ def test_a_session_without_user_overwrites_any_operator_with_null(env, session):
     }
 
 
-def test_the_conversation_falls_back_to_the_session_id_and_the_channel_to_cli(env, session):
-    session.values.pop("HERMES_SESSION_KEY")
+def test_the_channel_defaults_to_cli(env, session):
     session.values.pop("HERMES_SESSION_PLATFORM")
 
     operator = core.pre_tool_call_identity("mcp__cloudisp__find_subscriber", {}, "sess-9")["args"]["_operator"]
 
     assert (operator["conversation"], operator["channel"]) == ("sess-9", "cli")
+
+
+# ─── conversation ────────────────────────────────────────────────────────────
+
+CHAT_KEY = "agent:cloudisp-nvs:telegram:dm:941533777"
+
+
+def test_the_conversation_is_the_session_id_and_changes_with_it_while_the_chat_key_does_not(env, session):
+    session.values["HERMES_SESSION_KEY"] = CHAT_KEY
+
+    before = core.pre_tool_call_identity("mcp__cloudisp__find_subscriber", {}, "20261015_195100_aaaa1111")["args"]["_operator"]
+    after_new = core.pre_tool_call_identity("mcp__cloudisp__find_subscriber", {}, "20261015_203000_bbbb2222")["args"]["_operator"]
+
+    assert before["conversation"] == "20261015_195100_aaaa1111"
+    assert after_new["conversation"] == "20261015_203000_bbbb2222"
+    assert CHAT_KEY not in (before["conversation"], after_new["conversation"])
+
+
+def test_the_usage_event_and_the_operator_agree_on_the_conversation(env, session):
+    session.values["HERMES_SESSION_KEY"] = CHAT_KEY
+    operator = core.operator_arg("20261015_195100_ab12")
+    event = core.build_usage_event(usage_kw())
+
+    assert operator["conversation"] == event["conversation_ref"] == "20261015_195100_ab12"
+
+
+def test_every_turn_of_one_conversation_reports_the_same_ref_and_a_new_conversation_a_different_one(env, session):
+    session.values["HERMES_SESSION_KEY"] = CHAT_KEY
+    refs = [core.build_usage_event(usage_kw(session_id=sid, api_request_id=f"turn-{n}:api:1"))["conversation_ref"] for n, sid in enumerate(["s-1", "s-1", "s-1", "s-2", "s-2"])]
+
+    assert refs == ["s-1", "s-1", "s-1", "s-2", "s-2"]
+
+
+def test_without_a_hook_session_id_the_task_session_id_is_used_then_the_chat_key(env, session):
+    session.values["HERMES_SESSION_KEY"] = CHAT_KEY
+    session.values["HERMES_SESSION_ID"] = "20261015_210000_cccc3333"
+
+    assert core.conversation_id("") == "20261015_210000_cccc3333"
+
+    session.values["HERMES_SESSION_ID"] = ""
+
+    assert core.conversation_id("") == CHAT_KEY
+
+    session.values.pop("HERMES_SESSION_KEY")
+
+    assert core.conversation_id("") == ""
+
+
+def test_the_hook_session_id_wins_over_the_task_session_id(env, session):
+    session.values["HERMES_SESSION_ID"] = "stale-from-another-turn"
+
+    assert core.conversation_id("20261015_195100_ab12") == "20261015_195100_ab12"
+
+
+def test_a_subagent_belongs_to_the_conversation_that_delegated_to_it(env, session):
+    core.on_subagent_start(child_session_id="child-1", parent_session_id="20261015_195100_ab12")
+    core.on_subagent_start(child_session_id="grandchild-1", parent_session_id="child-1")
+
+    assert core.conversation_id("child-1") == core.conversation_id("grandchild-1") == "20261015_195100_ab12"
+    assert core.build_usage_event(usage_kw(session_id="child-1"))["conversation_ref"] == "20261015_195100_ab12"
+    assert core.build_usage_event(usage_kw(session_id="child-1"))["request_ref"].startswith("child-1:"), "the request ref keeps the agent's own session"
+
+    session.values["HERMES_SESSION_ID"] = "child-1"
+
+    assert core.conversation_id("") == "20261015_195100_ab12"
+
+
+def test_a_subagent_registered_without_a_parent_keeps_its_own_id_and_a_cycle_terminates(env, session):
+    core.on_subagent_start(child_session_id="orphan")
+    core.on_subagent_start(child_session_id="a", parent_session_id="b")
+    core.on_subagent_start(child_session_id="b", parent_session_id="a")
+
+    assert core.conversation_id("orphan") == "orphan"
+    assert core.conversation_id("a") in {"a", "b"}
+
+
+def test_the_conversation_is_at_most_128_printable_ascii_characters(env, session):
+    assert len(core.conversation_id("x" * 300)) == 128
+    assert core.conversation_id("ses\nsión\x00 ñ 7") == "ses sion  n 7"
+    assert core.conversation_id("a\r\nb\x00c") == "a b c"
+    assert core.build_usage_event(usage_kw(session_id="y" * 300))["conversation_ref"] == "y" * 128
 
 
 @pytest.mark.parametrize("tool", ["terminal", "clarify", "delegate_task", "mcp__other__find_subscriber", "mcp__cloudisp"])
@@ -329,7 +409,7 @@ def runtime_decision(tool, args, session_id="sess-1", turn_id="turn-1"):
     return types.SimpleNamespace(args=final_args, action=chosen.get("action"), message=chosen.get("message"))
 
 
-SESSION_OPERATOR = {"id": "941533777", "name": "Mario Santos", "channel": "telegram", "conversation": "agent:main:telegram:dm:941533777", "profile": "cloudisp-nvs"}
+SESSION_OPERATOR = {"id": "941533777", "name": "Mario Santos", "channel": "telegram", "conversation": "sess-1", "profile": "cloudisp-nvs"}
 FORGED = [
     {"id": "666", "name": "Mallory", "channel": "telegram", "conversation": "x"},
     "telegram:666",
@@ -486,7 +566,7 @@ def test_the_usage_event_carries_tokens_model_and_who_asked(env, session):
         "occurred_at": "2026-10-15T21:51:02.500000+00:00",
         "model": "deepseek-v4.1-flash", "provider": "opencode-go",
         "input_tokens": 1200, "output_tokens": 340, "cache_read_tokens": 5100, "cache_write_tokens": 0,
-        "conversation_ref": "agent:main:telegram:dm:941533777", "operator_ref": "telegram:941533777", "operator_name": "Mario Santos",
+        "conversation_ref": "20261015_195100_ab12", "operator_ref": "telegram:941533777", "operator_name": "Mario Santos",
     }
 
 
