@@ -756,6 +756,15 @@ def test_no_override_names_the_brand_a_tool_or_a_command_the_plugin_blocks():
         assert not re.search(r"[A-Za-z]{4,} (the|and|your|you) [a-z]+", text), f"{key} reads as English"
 
 
+def test_the_command_menu_describes_new_as_a_conversation_not_a_session():
+    description = strings.LOCALE_OVERRIDES["slash.new.description"]
+
+    assert description == "Empezar una conversación nueva"
+    assert 1 <= len(description) <= 256, "Telegram's limit for a BotCommand description"
+    assert not re.search(r"sesi[oó]n|session|hermes|id\b", description, re.IGNORECASE)
+    assert "\u2014" not in description and "\u2013" not in description, "BotFather rejects unicode dashes in descriptions"
+
+
 def test_the_heartbeat_has_no_detail_and_the_clarify_card_no_skip_hint():
     assert "{detail}" not in strings.LOCALE_OVERRIDES["gateway.progress.working_heartbeat"]
     assert strings.LOCALE_OVERRIDES["gateway.clarify.skip_hint"] == ""

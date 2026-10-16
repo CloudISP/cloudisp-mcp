@@ -38,6 +38,8 @@ TRY_AGAIN_TEXT = "⚠️ No pude completar la respuesta en este momento. Probá 
 APPROVAL_NO_DETAIL = "sin detalles"
 
 LOCALE_OVERRIDES: dict[str, str] = {
+    # The Telegram command menu: `/new` is the runtime's own command, described by `slash.new.description`.
+    "slash.new.description": "Empezar una conversación nueva",
     # /new and the session banner: no model, provider, context size or tip.
     "gateway.reset.header_default": NEUTRAL_RESET_TEXT,
     "gateway.reset.header_new": NEUTRAL_RESET_TEXT,
