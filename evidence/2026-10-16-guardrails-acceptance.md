@@ -59,12 +59,23 @@ Fase F of the commercial plan. The matrix is the same one as [the baseline](2026
 - Two in-memory overrides of engine internals:
   - the clarify "(Recommended)" marker;
   - the approval buttons, limited to once/deny for plugin approvals.
-- If a Hermes upgrade breaks either override, the gateway log shows `CLOUDISP_PATCH_FAILED <name>`. Check that marker after every Hermes update.
+- If a Hermes upgrade breaks either override, the gateway log shows `CLOUDISP_PATCH_FAILED <name>`. Check that marker after every Hermes update. Ignacio approved keeping both overrides (2026-10-16).
 - The very first shutdown notice of the restart that installed the plugin was the old English/Hermes text. It is overridden from then on: "⚠️ El asistente se está apagando…".
-- `/new` keeps the engine's menu description.
 - A context compression rotates the session id, so a long conversation can appear as two in the "Conversaciones" KPI.
 
 ## Follow-ups found
 
-- The usage page tells tenant managers the pricing table name (`opencode-go-2026-10`), and the api_client name contains "(Hermes)". A fix is in progress (`fix/agent-usage-brand-leak`).
+- The usage page told tenant managers the pricing table name (`opencode-go-2026-10`), and the api_client name contained "(Hermes)". Fixed in admin v3.53.1 (PR #1518); the client was renamed to "Asistente CloudISP · NVS InterService".
 - Subscriber 2773: the name field contains credential-like text (data issue, not touched).
+
+## Follow-up verification (2026-10-16 09:15–09:27 ART, no writes)
+
+| Check | Result |
+|---|---|
+| `/guia` after the formatting fix | Examples render as `«…»`, no raw `_`; split in 2 messages |
+| 80% warning | Monthly cap set to 0.22 USD (spent 0.199, 90%). The next reply ended with "⚠️ El Asistente CloudISP ya usó más del 80% del cupo de este período." Cap restored to 20.00 and the test marker `warned-cloudisp-nvs-monthly-2026-10-…` deleted |
+| "Consumos del mes" as a Manager | Impersonated employee 8 (Gerente de operaciones, NVS). Page text and HTML had no hermes/opencode/deepseek/kimi/nous/omh; copy says "su tarifa vigente". Impersonation stopped |
+| Fallback model | `opencode-go/kimi-k2.7-code` answered 200 through the OpenCode Go key (the same provider as the primary). The 401 belonged to an unused `KIMI_API_KEY` (provider `kimi-coding`), which was removed from the profile `.env` |
+| Tenant scripts | `new-tenant.sh` and `host-setup.sh` ran for real against Hermes v0.22 in an isolated `HERMES_HOME` sandbox on CT 108 with fake secrets: 33/33 and 18/18 config values, files 600/700, `mcp test` 55 tools, `CLOUDISP_PLUGIN_READY patches=ok`. Two bugs fixed in `6e17a29` (HERMES_HOME, host profile pinning). The live tree was untouched |
+| `/new` menu text | v0.5.1 (`6e17a29`) deployed, gateway restarted 09:25 (idle). `getMyCommands`: `guia` "Guía de lo que puedo hacer", `new` "Empezar una conversación nueva". Smoke after restart OK |
+| Telegram group | Deferred by Ignacio |
