@@ -6,12 +6,16 @@ import logging
 
 from . import core, patches
 
-log = logging.getLogger("cloudisp")
+# Under the runtime this is `hermes_plugins.cloudisp`: only `hermes_plugins*` loggers reach gateway.log.
+log = logging.getLogger(__name__)
 
 
 def register(ctx) -> None:
     """Wire the plugin. The hooks and the write list are required (without them there is no identity
-    and no approval, and the MCP refuses every write); the rest degrades with a warning."""
+    and no approval, and the MCP refuses every write); the rest degrades loudly and never stops the plugin.
+
+    The last thing it does is log one `CLOUDISP_PLUGIN_READY` health line (see `patches.ready_line`).
+    """
     core.WRITE_TOOLS.clear()
     core.WRITE_TOOLS.update(core.load_write_tools())
 
@@ -29,15 +33,32 @@ def register(ctx) -> None:
     ctx.register_command(core.BLOCKED_COMMAND, core.blocked_command, description="Comando no disponible")
     ctx.register_command(core.QUOTA_COMMAND, core.quota_command, description="Cupo de uso agotado")
 
+    middleware = "ok"
+
     try:
         ctx.register_middleware("llm_request", core.scrub_request)
     except Exception as error:
+        middleware = "failed"
         log.warning("cloudisp: prompt scrubbing is off (no llm_request middleware): %s", error)
 
-    patches.apply()
+    results = patches.apply()
+    locale = "ok"
 
     for language in ("es", "en"):
         try:
             ctx.register_locale(language, core.LOCALE_OVERRIDES)
         except Exception as error:
+            locale = "failed"
             log.warning("cloudisp: chat strings not overridden for %s: %s", language, error)
+
+    line = patches.ready_line(
+        results, version=core.VERSION, write_tools=len(core.WRITE_TOOLS), middleware=middleware, locale=locale,
+        profile=getattr(ctx, "profile_name", "") or "-",
+    )
+
+    if not all(results.values()):
+        log.error(line)
+    elif "failed" in (middleware, locale):
+        log.warning(line)
+    else:
+        log.info(line)

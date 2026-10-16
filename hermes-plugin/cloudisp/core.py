@@ -31,8 +31,10 @@ from .strings import (
     BLOCKED_COMMAND,
     BLOCKED_TEXT,
     DENIED_RETRY_TEXT,
+    GUARD_ERROR_TEXT,
     LOCALE_OVERRIDES,
     NEUTRAL_RESET_TEXT,
+    OPERATOR_UNKNOWN_TEXT,
     QUOTA_COMMAND,
     QUOTA_EXHAUSTED_TEXT,
     QUOTA_WARNING_TEXT,
@@ -40,9 +42,11 @@ from .strings import (
     SUBAGENT_WRITE_TEXT,
 )
 
-log = logging.getLogger("cloudisp")
+# Under the runtime this module is `hermes_plugins.cloudisp.core`, and only `hermes_plugins*` loggers reach gateway.log.
+log = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
+VERSION = "0.5.0"  # same as plugin.yaml (a test keeps them equal)
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "env_file": "",
@@ -209,7 +213,7 @@ def api_call(settings: dict[str, Any], method: str, path: str, body: dict | None
         headers={
             "Authorization": f"Bearer {key}",
             "Accept": "application/json",
-            "User-Agent": "cloudisp-hermes-plugin/0.5.0",  # the default urllib agent is refused by some edge filters
+            "User-Agent": f"cloudisp-hermes-plugin/{VERSION}",  # the default urllib agent is refused by some edge filters
             **({"Content-Type": "application/json"} if body is not None else {}),
             **(headers or {}),
         },
@@ -355,39 +359,101 @@ def load_write_tools() -> dict[str, str]:
 WRITE_TOOLS: dict[str, str] = {}
 
 
+_BARE_CHANNEL = re.compile(r"^[a-z]{2,16}$")
+_BARE_USER_ID = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
+
+
 def mcp_tool(tool_name: str, server: str) -> str | None:
     """The MCP tool a registered name stands for (`mcp__<server>__<tool>`), else None."""
+    if not isinstance(tool_name, str):
+        return None
+
     prefix = f"mcp__{re.sub(r'[^A-Za-z0-9_]', '_', server)}__"
 
     return tool_name[len(prefix):] if tool_name.startswith(prefix) else None
 
 
-def operator_arg(session_id: str = "") -> dict | None:
-    """Who is talking, from the session: the hidden `_operator` argument of every MCP call."""
-    user_id = get_session_env("HERMES_SESSION_USER_ID", "")
+def mcp_server_name() -> str:
+    """Configured MCP server name; the default when the settings cannot be read (never raises)."""
+    try:
+        return str(settings_for(session_profile())["mcp_server"])
+    except Exception:
+        return str(DEFAULT_SETTINGS["mcp_server"])
 
-    if not user_id:
+
+def operator_arg(session_id: str = "") -> dict | None:
+    """Who is talking, from the session: the hidden `_operator` argument of every MCP call.
+
+    None when the session has no user or the identity would not pass the MCP's own check
+    (`^[a-z]{2,16}$` channel, `^[A-Za-z0-9._-]{1,40}$` id): the call then carries no operator at all.
+    """
+    user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "")
+    channel = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "cli").lower()
+
+    if not _BARE_USER_ID.match(user_id) or not _BARE_CHANNEL.match(channel):
         return None
 
     return {
-        "id": str(user_id),
+        "id": user_id,
         "name": get_session_env("HERMES_SESSION_USER_NAME", "") or "",
-        "channel": get_session_env("HERMES_SESSION_PLATFORM", "") or "cli",
+        "channel": channel,
         "conversation": get_session_env("HERMES_SESSION_KEY", "") or session_id or "",
         "profile": get_session_env("HERMES_SESSION_PROFILE", "") or "",
     }
 
 
-def pre_tool_call_identity(tool_name: str = "", args: dict | None = None, session_id: str = "", **_: Any) -> dict | None:
-    """Stamp the operator on every call to the CloudISP MCP server.
+def may_be_cloudisp_write(tool_name: Any) -> bool:
+    """Whether a tool name can be one of the write tools of the CloudISP MCP, judged by the name alone.
 
-    A model-supplied `_operator` is overwritten (with null when the session has no user), so the
-    identity always comes from the session.
+    Used only when something failed and the real settings are unknown: any `mcp__*__<write tool>` counts,
+    whatever the server is called. Never raises.
     """
-    if mcp_tool(tool_name, settings_for(session_profile())["mcp_server"]) is None:
+    return isinstance(tool_name, str) and tool_name.startswith("mcp__") and tool_name.rsplit("__", 1)[-1] in WRITE_TOOLS
+
+
+def may_be_cloudisp_tool(tool_name: Any) -> bool:
+    """Whether a tool name belongs to the default-named CloudISP MCP server. Never raises."""
+    return isinstance(tool_name, str) and tool_name.startswith(f"mcp__{DEFAULT_SETTINGS['mcp_server']}__")
+
+
+def fail_closed(stage: str, tool_name: Any, error: BaseException) -> dict | None:
+    """What a guard answers when it raised: a write is blocked, a read goes out without any operator.
+
+    The runtime also vetoes a `pre_tool_call` callback that raised, but that is the runtime's wording and
+    version, so the plugin does not rely on it. `CLOUDISP_GUARD_ERROR` is the marker to grep for.
+    """
+    log.error("CLOUDISP_GUARD_ERROR stage=%s tool=%s error=%s: %s", stage, tool_name, type(error).__name__, error)
+
+    if may_be_cloudisp_write(tool_name):
+        return {"action": "block", "message": GUARD_ERROR_TEXT}
+
+    if stage == "identity" and may_be_cloudisp_tool(tool_name):
+        return {"action": "modify", "args": {"_operator": None}}
+
+    return None
+
+
+def stamp_operator(tool_name: str, session_id: str) -> dict | None:
+    server = mcp_server_name()
+
+    if mcp_tool(tool_name, server) is None:
         return None
 
     return {"action": "modify", "args": {"_operator": operator_arg(session_id)}}
+
+
+def pre_tool_call_identity(tool_name: str = "", args: dict | None = None, session_id: str = "", **_: Any) -> dict | None:
+    """Stamp the operator on every call to the CloudISP MCP server.
+
+    Any `_operator` the model supplied is overwritten: with the session's operator, or with null when
+    the session has no (valid) user. The runtime merges a `modify` directive over the model's arguments,
+    so the model's value can never survive. If this raises, a write is blocked and a read goes out
+    stripped (see `fail_closed`).
+    """
+    try:
+        return stamp_operator(tool_name, session_id)
+    except Exception as error:
+        return fail_closed("identity", tool_name, error)
 
 
 _child_sessions: OrderedDict[str, None] = OrderedDict()
@@ -446,21 +512,18 @@ _MAX_DENIED_TURNS = 1000
 RULE_KEY_PREFIX = "cloudisp-write-"
 
 
-def pre_tool_call_gate(tool_name: str = "", args: dict | None = None, session_id: str = "", turn_id: str = "", **_: Any) -> dict | None:
-    """Every write goes to human approval, with a rule key that is never reused.
-
-    A fresh key per call means "approve for the session" or "always" can never approve another
-    write. Writes from subagents are refused outright, and so is any write after the operator
-    denied (or let expire) a confirmation earlier in the same turn: only a new message from the
-    operator starts a new turn and can ask again.
-    """
-    name = mcp_tool(tool_name, settings_for(session_profile())["mcp_server"])
+def gate_write(tool_name: str, args: dict | None, session_id: str, turn_id: str) -> dict | None:
+    name = mcp_tool(tool_name, mcp_server_name())
 
     if name is None or name not in WRITE_TOOLS:
         return None
 
     if is_subagent(session_id):
         return {"action": "block", "message": SUBAGENT_WRITE_TEXT}
+
+    # Independent of the identity callback: if the operator cannot be derived here, nothing is approved.
+    if operator_arg(session_id) is None:
+        return {"action": "block", "message": OPERATOR_UNKNOWN_TEXT}
 
     if turn_id and (session_id, turn_id) in _denied_turns:
         return {"action": "block", "message": DENIED_RETRY_TEXT}
@@ -472,6 +535,21 @@ def pre_tool_call_gate(tool_name: str = "", args: dict | None = None, session_id
         "message": f"✍️ Confirmá: {WRITE_TOOLS[name]}" + (f" — {summary}" if summary else ""),
         "rule_key": f"{RULE_KEY_PREFIX}{uuid.uuid4().hex}",
     }
+
+
+def pre_tool_call_gate(tool_name: str = "", args: dict | None = None, session_id: str = "", turn_id: str = "", **_: Any) -> dict | None:
+    """Every write goes to human approval, with a rule key that is never reused.
+
+    A fresh key per call means "approve for the session" or "always" can never approve another
+    write. Writes from subagents are refused outright, and so is any write after the operator
+    denied (or let expire) a confirmation earlier in the same turn: only a new message from the
+    operator starts a new turn and can ask again. The gate derives the operator again on its own and
+    blocks the write when it cannot, and any error in it blocks a write (see `fail_closed`).
+    """
+    try:
+        return gate_write(tool_name, args, session_id, turn_id)
+    except Exception as error:
+        return fail_closed("gate", tool_name, error)
 
 
 def on_approval_response(pattern_key: str = "", choice: str = "", session_id: str = "", turn_id: str = "", **_: Any) -> None:

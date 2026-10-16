@@ -139,3 +139,4 @@ echo "  1. BotFather: nombre \"$BOT_NAME · $TENANT\" y foto (/setuserpic con el
 [ -n "$TG_USER" ] || echo "  2. Completar TELEGRAM_ALLOWED_USERS y TELEGRAM_HOME_CHANNEL en $PROFILE_DIR/.env (id numérico del usuario autorizado)."
 echo "  3. host-setup.sh una vez por host (plugin y claves del gateway) y la KB del cliente en el admin."
 echo "  4. Reiniciar hermes-gateway SÓLO sin turnos ni delegaciones en curso."
+echo "  5. Verificar el arranque: grep -h CLOUDISP_PLUGIN_READY ~/.hermes/logs/gateway.log \"$PROFILE_DIR/logs/gateway.log\" (patches=ok) y que no haya CLOUDISP_PATCH_FAILED en errors.log."

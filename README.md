@@ -347,7 +347,9 @@ Las skills responden en español.
 `hermes-plugin/cloudisp/` es el plugin de Hermes que completa lo que el motor no
 configura (comandos permitidos, corte por cupo, `/guia`, identidad del operador,
 aprobación en español, registro de consumo, limpieza de marcas); su
-[README](hermes-plugin/cloudisp/README.md) documenta las APIs de Hermes que usa.
+[README](hermes-plugin/cloudisp/README.md) documenta las APIs de Hermes que usa. Al
+arrancar deja en el log la línea `CLOUDISP_PLUGIN_READY patches=ok …` (o
+`patches=failed:…` y un `CLOUDISP_PATCH_FAILED` por parche que no se pudo aplicar).
 `deploy/hermes-tenant/` tiene el template (`SOUL.md.tmpl`) y `new-tenant.sh`, que
 crea el perfil `cloudisp-<cliente>` con toda la configuración. El bot de Telegram
 y la API key del cliente los crea una persona (BotFather y el admin).

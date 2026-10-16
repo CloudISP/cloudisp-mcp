@@ -17,6 +17,13 @@ QUOTA_EXHAUSTED_TEXT = (
     "Contactá a tu administrador de CloudISP."
 )
 QUOTA_WARNING_TEXT = "⚠️ El Asistente CloudISP ya usó más del 80% del cupo de este período."
+OPERATOR_UNKNOWN_TEXT = (
+    "No pude identificar quién pide esta acción, así que no se ejecutó. "
+    "Escribime de nuevo desde tu cuenta autorizada."
+)
+GUARD_ERROR_TEXT = (
+    "Hubo un problema al validar esta acción y no se ejecutó. Probá de nuevo en un momento."
+)
 SUBAGENT_WRITE_TEXT = (
     "Los subagentes sólo pueden consultar; la acción la tiene que pedir el asistente principal con confirmación."
 )

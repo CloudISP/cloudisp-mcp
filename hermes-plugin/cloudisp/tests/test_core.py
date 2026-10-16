@@ -2,6 +2,7 @@
 
 import json
 import re
+import types
 from pathlib import Path
 
 import pytest
@@ -291,6 +292,172 @@ def test_the_shipped_write_list_matches_the_catalogue():
     assert all(label for label in shipped.values())
 
 
+# ─── fail closed ─────────────────────────────────────────────────────────────
+
+RUNTIME_KWARGS = {"task_id": "task-1", "tool_call_id": "call-1", "api_request_id": "turn-1:api:1", "middleware_trace": [], "telemetry_schema_version": "hermes.observer.v1"}
+
+
+def runtime_decision(tool, args, session_id="sess-1", turn_id="turn-1"):
+    """What the runtime does with the plugin's two `pre_tool_call` callbacks (`hermes_cli/plugins.py::_get_pre_tool_call_directive_details`).
+
+    Both run in registration order over the SAME model arguments, with every kwarg the runtime sends; `modify` results shallow-merge
+    over those arguments; a `block` beats an `approve`. Unlike the runtime, an exception is not caught here: the callbacks must never raise.
+    """
+    results = [
+        callback(tool_name=tool, args=args, session_id=session_id, turn_id=turn_id, **RUNTIME_KWARGS)
+        for callback in (core.pre_tool_call_identity, core.pre_tool_call_gate)
+    ]
+    results = [result for result in results if result is not None]
+    final_args = args
+
+    for result in results:
+        if result.get("action") == "modify" and result.get("args"):
+            final_args = {**final_args, **result["args"]}
+
+    blocks = [result for result in results if result.get("action") == "block"]
+    approves = [result for result in results if result.get("action") == "approve"]
+    chosen = (blocks or approves or [{}])[0]
+
+    return types.SimpleNamespace(args=final_args, action=chosen.get("action"), message=chosen.get("message"))
+
+
+SESSION_OPERATOR = {"id": "941533777", "name": "Mario Santos", "channel": "telegram", "conversation": "agent:main:telegram:dm:941533777", "profile": "cloudisp-nvs"}
+FORGED = [
+    {"id": "666", "name": "Mallory", "channel": "telegram", "conversation": "x"},
+    "telegram:666",
+    ["telegram", "666"],
+    {"id": "941533777"},
+    None,
+    {},
+]
+
+
+@pytest.mark.parametrize("forged", FORGED)
+@pytest.mark.parametrize("tool", ["mcp__cloudisp__find_subscriber", "mcp__cloudisp__reboot_onu"])
+def test_an_operator_forged_by_the_model_is_replaced_by_the_session_operator(env, session, tool, forged):
+    decision = runtime_decision(tool, {"subscriber_id": 1, "_operator": forged})
+
+    assert decision.args["_operator"] == SESSION_OPERATOR
+    assert decision.args["subscriber_id"] == 1
+    assert decision.action == ("approve" if tool.endswith("reboot_onu") else None)
+
+
+@pytest.mark.parametrize("forged", FORGED)
+def test_without_a_session_user_a_forged_operator_is_stripped_and_a_write_is_blocked(env, session, forged):
+    session.values.pop("HERMES_SESSION_USER_ID")
+
+    read = runtime_decision("mcp__cloudisp__find_subscriber", {"query": "x", "_operator": forged})
+    write = runtime_decision("mcp__cloudisp__reboot_onu", {"subscriber_id": 1, "_operator": forged})
+
+    assert read.args["_operator"] is None and read.action is None
+    assert write.args["_operator"] is None
+    assert (write.action, write.message) == ("block", core.OPERATOR_UNKNOWN_TEXT)
+
+
+@pytest.mark.parametrize("key, value", [
+    ("HERMES_SESSION_USER_ID", "a b"), ("HERMES_SESSION_USER_ID", "x" * 41), ("HERMES_SESSION_USER_ID", "941/533"), ("HERMES_SESSION_USER_ID", ""),
+    ("HERMES_SESSION_PLATFORM", "Tele gram"), ("HERMES_SESSION_PLATFORM", "t"), ("HERMES_SESSION_PLATFORM", "telegram:1"),
+])
+def test_an_identity_the_mcp_would_refuse_counts_as_no_identity(env, session, key, value):
+    session.values[key] = value
+
+    assert core.operator_arg("sess-1") is None
+    assert runtime_decision("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}).action == "block"
+
+
+def test_the_platform_is_lowercased_like_the_mcp_expects(env, session):
+    session.values["HERMES_SESSION_PLATFORM"] = "Telegram"
+
+    assert core.operator_arg("sess-1")["channel"] == "telegram"
+
+
+def test_the_gate_derives_the_operator_on_its_own(env, session):
+    assert core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1")["action"] == "approve"
+
+    session.values.pop("HERMES_SESSION_USER_ID")
+
+    assert core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1") == {"action": "block", "message": core.OPERATOR_UNKNOWN_TEXT}
+    assert core.pre_tool_call_gate("mcp__cloudisp__find_subscriber", {"query": "x"}, "sess-1") is None
+
+
+def test_the_gate_blocks_when_the_identity_callback_succeeded_but_its_own_derivation_fails(env, session, monkeypatch):
+    real = core.operator_arg
+    calls = []
+
+    def flaky(session_id=""):
+        calls.append(session_id)
+
+        if len(calls) > 1:
+            raise RuntimeError("session store went away")
+
+        return real(session_id)
+
+    monkeypatch.setattr(core, "operator_arg", flaky)
+
+    assert core.pre_tool_call_identity("mcp__cloudisp__reboot_onu", {}, "sess-1")["args"]["_operator"]["id"] == "941533777"
+    assert core.pre_tool_call_gate("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}, "sess-1") == {"action": "block", "message": core.GUARD_ERROR_TEXT}
+
+
+def boom(*args, **kwargs):
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("failing", ["operator_arg", "mcp_server_name"])
+def test_an_error_while_deriving_the_identity_blocks_every_write_and_strips_every_read(env, session, monkeypatch, caplog, failing):
+    monkeypatch.setattr(core, failing, boom)
+
+    with caplog.at_level("ERROR"):
+        write = runtime_decision("mcp__cloudisp__reboot_onu", {"subscriber_id": 1, "_operator": FORGED[0]})
+        read = runtime_decision("mcp__cloudisp__find_subscriber", {"query": "x", "_operator": FORGED[0]})
+
+    assert (write.action, write.message) == ("block", core.GUARD_ERROR_TEXT)
+    assert read.action is None and read.args["_operator"] is None, "a read goes out, but never with the forged identity"
+    assert any("CLOUDISP_GUARD_ERROR stage=identity tool=mcp__cloudisp__reboot_onu error=RuntimeError: boom" in message for message in error_records(caplog))
+
+
+def test_an_error_in_the_gate_alone_blocks_a_write(env, session, monkeypatch, caplog):
+    monkeypatch.setattr(core, "summarize_args", boom)
+
+    with caplog.at_level("ERROR"):
+        write = runtime_decision("mcp__cloudisp__reboot_onu", {"subscriber_id": 1})
+        read = runtime_decision("mcp__cloudisp__find_subscriber", {"query": "x"})
+
+    assert (write.action, write.message) == ("block", core.GUARD_ERROR_TEXT)
+    assert write.args["_operator"] == SESSION_OPERATOR
+    assert read.action is None and read.args["_operator"] == SESSION_OPERATOR
+    assert any("CLOUDISP_GUARD_ERROR stage=gate tool=mcp__cloudisp__reboot_onu" in message for message in error_records(caplog))
+
+
+def test_an_unreadable_config_falls_back_to_the_default_server_and_keeps_working(env, session, monkeypatch):
+    monkeypatch.setattr(core, "settings_for", boom)
+
+    decision = runtime_decision("mcp__cloudisp__reboot_onu", {"subscriber_id": 1, "_operator": FORGED[0]})
+
+    assert decision.args["_operator"] == SESSION_OPERATOR and decision.action == "approve"
+
+
+def test_when_something_failed_a_write_named_tool_of_any_server_is_blocked_and_other_tools_are_left_alone(env, session, monkeypatch):
+    monkeypatch.setattr(core, "mcp_server_name", boom)
+
+    assert runtime_decision("mcp__cloudisp_prod__kick_pppoe", {"subscriber_id": 1}).action == "block"
+    assert runtime_decision("mcp__other__find_user", {"q": 1, "_operator": "keep"}).args["_operator"] == "keep"
+    assert runtime_decision("terminal", {"command": "ls"}).action is None
+
+
+@pytest.mark.parametrize("tool", [None, 5, "", [], {"name": "x"}])
+def test_a_tool_name_that_is_not_a_string_never_raises(env, session, tool):
+    assert core.pre_tool_call_identity(tool, {}, "s") is None
+    assert core.pre_tool_call_gate(tool, {}, "s") is None
+    assert core.mcp_tool(tool, "cloudisp") is None
+
+
+def test_a_session_error_blocks_a_write_even_when_the_session_variables_raise(env, monkeypatch):
+    monkeypatch.setattr(core, "get_session_env", boom)
+
+    assert runtime_decision("mcp__cloudisp__reboot_onu", {"subscriber_id": 1}).action == "block"
+    assert runtime_decision("mcp__cloudisp__find_subscriber", {"q": 1, "_operator": FORGED[0]}).args["_operator"] is None
+
+
 # ─── usage ledger ────────────────────────────────────────────────────────────
 
 
@@ -575,14 +742,14 @@ def runtime(monkeypatch):
 def test_the_clarify_card_loses_the_recommended_marker(runtime):
     assert runtime.clarify.mark_recommended(["✅ Confirmar", "❌ Cancelar"])[0].endswith("(Recommended)")
 
-    assert patches.apply()["clarify"] is True
+    assert patches.apply()["mark_recommended"] is True
     assert runtime.clarify.mark_recommended(["✅ Confirmar", "❌ Cancelar"]) == ["✅ Confirmar", "❌ Cancelar"]
 
 
 def test_a_plugin_write_card_offers_only_approve_and_deny(runtime):
     import asyncio
 
-    assert patches.apply()["exec_approval"] is True
+    assert patches.apply()["send_exec_approval"] is True
 
     result = asyncio.run(runtime.telegram().send_exec_approval(
         chat_id="1", command=RULE_COMMAND, session_key="k", description="✍️ Confirmá: Reiniciar la ONU — Abonado: 2861", metadata=None,
@@ -605,27 +772,120 @@ def test_every_other_approval_keeps_its_card_and_its_buttons(runtime):
 def test_the_patches_apply_once(runtime):
     patches.apply()
     first = (runtime.clarify.mark_recommended, runtime.adapter.send_exec_approval)
-    patches.apply()
 
+    assert patches.apply() == {"mark_recommended": True, "send_exec_approval": True}
     assert (runtime.clarify.mark_recommended, runtime.adapter.send_exec_approval) == first
 
 
-def test_a_runtime_without_the_targets_only_logs(monkeypatch, caplog):
+# ─── patch regressions are loud ──────────────────────────────────────────────
+
+
+def error_records(caplog):
+    return [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
+
+
+def test_a_runtime_without_the_targets_logs_each_failed_patch_at_error_with_its_marker(monkeypatch, caplog):
     import sys
 
     for name in ("tools", "tools.clarify_tool", "gateway", "gateway.platforms", "gateway.platforms.base"):
         monkeypatch.setitem(sys.modules, name, None)
 
-    with caplog.at_level("WARNING", logger="cloudisp"):
-        assert patches.apply() == {"clarify": False, "exec_approval": False}
+    with caplog.at_level("INFO"):
+        assert patches.apply() == {"mark_recommended": False, "send_exec_approval": False}
 
-    assert "runtime patch 'clarify' not applied" in caplog.text
+    messages = error_records(caplog)
+
+    assert len(messages) == 2
+    assert messages[0].startswith("CLOUDISP_PATCH_FAILED mark_recommended reason=")
+    assert messages[1].startswith("CLOUDISP_PATCH_FAILED send_exec_approval reason=")
+    assert all("the runtime's own wording stays" in message for message in messages)
+
+
+def test_a_moved_clarify_helper_fails_only_that_patch(runtime, caplog):
+    runtime.clarify.mark_recommended = "not a function any more"
+
+    with caplog.at_level("INFO"):
+        assert patches.apply() == {"mark_recommended": False, "send_exec_approval": True}
+
+    assert error_records(caplog) == [next(message for message in error_records(caplog) if message.startswith("CLOUDISP_PATCH_FAILED mark_recommended "))]
+    assert "is not callable" in error_records(caplog)[0]
+
+
+def test_a_clarify_card_that_still_shows_the_marker_fails_the_patch(runtime, caplog):
+    runtime.clarify._normalize_questions = lambda questions: ([{"qid": "q0", "choices": ["✅ Confirmar (Recommended)", "❌ Cancelar"]}], None)
+
+    with caplog.at_level("INFO"):
+        assert patches.apply()["mark_recommended"] is False
+
+    assert "clarify cards still carry the marker" in error_records(caplog)[0]
+
+
+def test_a_clarify_helper_that_cannot_be_probed_does_not_fail_the_patch(runtime):
+    runtime.clarify._normalize_questions = lambda questions: (_ for _ in ()).throw(RuntimeError("moved"))
+
+    assert patches.apply()["mark_recommended"] is True
+
+
+@pytest.mark.parametrize("drift, reason", [
+    (lambda self, chat_id, text: None, "is no longer a coroutine function"),
+    (None, "no longer takes command, session_key, description, metadata, allow_permanent, allow_session, smart_denied"),
+])
+def test_a_changed_approval_signature_fails_the_patch_and_leaves_the_runtime_method_alone(runtime, caplog, drift, reason):
+    async def renamed(self, chat_id, text):
+        return "sent"
+
+    original = drift or renamed
+    runtime.adapter.send_exec_approval = original
+
+    with caplog.at_level("INFO"):
+        assert patches.apply() == {"mark_recommended": True, "send_exec_approval": False}
+
+    assert runtime.adapter.send_exec_approval is original
+    assert reason in error_records(caplog)[0]
+    assert error_records(caplog)[0].startswith("CLOUDISP_PATCH_FAILED send_exec_approval reason=PatchError")
+
+
+def test_a_telegram_adapter_that_overrides_the_approval_method_fails_the_patch(runtime, caplog):
+    class TelegramAdapter(runtime.adapter):
+        async def send_exec_approval(self, chat_id, command, session_key, description=None, metadata=None, allow_permanent=True, allow_session=True, smart_denied=False):
+            return "own card"
+
+    with caplog.at_level("INFO"):
+        assert patches.apply()["send_exec_approval"] is False
+
+    assert "overrides send_exec_approval and bypasses the wrapper" in error_records(caplog)[0]
+    assert TelegramAdapter.__qualname__ in error_records(caplog)[0]
+
+
+def test_the_ready_line_lists_the_failed_patches():
+    ok = {"mark_recommended": True, "send_exec_approval": True}
+
+    assert patches.ready_line(ok) == "CLOUDISP_PLUGIN_READY patches=ok"
+    assert patches.ready_line(ok, version="0.5.0", write_tools=19) == "CLOUDISP_PLUGIN_READY patches=ok version=0.5.0 write_tools=19"
+    assert patches.ready_line({"mark_recommended": True, "send_exec_approval": False}) == "CLOUDISP_PLUGIN_READY patches=failed:send_exec_approval"
+    assert patches.ready_line({"mark_recommended": False, "send_exec_approval": False}, profile="p") == "CLOUDISP_PLUGIN_READY patches=failed:mark_recommended,send_exec_approval profile=p"
+
+
+def test_the_loggers_inherit_the_runtime_namespace_that_reaches_gateway_log():
+    # The runtime loads the plugin as `hermes_plugins.cloudisp`; only `hermes_plugins*` loggers reach gateway.log.
+    import cloudisp
+
+    assert core.log.name == core.__name__ and patches.log.name == patches.__name__ and cloudisp.log.name == cloudisp.__name__
+
+
+def test_the_plugin_version_is_the_one_of_the_manifest_and_of_the_package():
+    package = json.loads((PLUGIN_DIR.parents[1] / "package.json").read_text())
+
+    assert core.VERSION == package["version"]
+    assert f'version: "{core.VERSION}"' in (PLUGIN_DIR / "plugin.yaml").read_text()
 
 
 # ─── wiring ──────────────────────────────────────────────────────────────────
 
 
 class FakeContext:
+    profile_name = "cloudisp-nvs"
+
     def __init__(self):
         self.hooks, self.commands, self.middleware, self.locales = [], {}, [], {}
 
@@ -661,6 +921,54 @@ def test_register_wires_every_hook_command_middleware_and_locale(env):
     assert ctx.middleware == [("llm_request", "scrub_request")]
     assert sorted(ctx.locales) == ["en", "es"]
     assert "reboot_onu" in core.WRITE_TOOLS
+
+
+def lines(caplog, marker):
+    return [(record.levelname, record.getMessage()) for record in caplog.records if marker in record.getMessage()]
+
+
+def test_register_logs_one_healthy_ready_line_when_every_patch_applies(env, runtime, caplog):
+    with caplog.at_level("INFO"):
+        register(FakeContext())
+
+    assert lines(caplog, "CLOUDISP_PLUGIN_READY") == [(
+        "INFO", f"CLOUDISP_PLUGIN_READY patches=ok version={core.VERSION} write_tools={len(core.WRITE_TOOLS)} middleware=ok locale=ok profile=cloudisp-nvs",
+    )]
+    assert lines(caplog, "CLOUDISP_PATCH_FAILED") == []
+
+
+def test_register_logs_the_failed_patches_at_error_and_still_wires_the_plugin(env, monkeypatch, caplog):
+    import sys
+
+    for name in ("tools", "tools.clarify_tool", "gateway", "gateway.platforms", "gateway.platforms.base"):
+        monkeypatch.setitem(sys.modules, name, None)
+
+    ctx = FakeContext()
+
+    with caplog.at_level("INFO"):
+        register(ctx)
+
+    failed = lines(caplog, "CLOUDISP_PATCH_FAILED")
+
+    assert [level for level, _ in failed] == ["ERROR", "ERROR"]
+    assert [message.split()[1] for _, message in failed] == ["mark_recommended", "send_exec_approval"]
+    assert lines(caplog, "CLOUDISP_PLUGIN_READY") == [(
+        "ERROR", f"CLOUDISP_PLUGIN_READY patches=failed:mark_recommended,send_exec_approval version={core.VERSION} write_tools={len(core.WRITE_TOOLS)} middleware=ok locale=ok profile=cloudisp-nvs",
+    )]
+    assert ("pre_tool_call", "pre_tool_call_gate") in ctx.hooks and sorted(ctx.locales) == ["en", "es"]
+
+
+def test_register_flags_a_missing_middleware_or_locale_on_the_ready_line(env, runtime, caplog):
+    ctx = FakeContext()
+    ctx.register_middleware = lambda *args: (_ for _ in ()).throw(AttributeError("no middleware"))
+    ctx.register_locale = lambda *args, **kw: (_ for _ in ()).throw(AttributeError("no locales"))
+
+    with caplog.at_level("INFO"):
+        register(ctx)
+
+    assert lines(caplog, "CLOUDISP_PLUGIN_READY") == [(
+        "WARNING", f"CLOUDISP_PLUGIN_READY patches=ok version={core.VERSION} write_tools={len(core.WRITE_TOOLS)} middleware=failed locale=failed profile=cloudisp-nvs",
+    )]
 
 
 def test_register_fails_without_the_write_list(env, monkeypatch):

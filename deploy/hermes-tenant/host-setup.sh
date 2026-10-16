@@ -53,4 +53,4 @@ cfg display.status_phrases.generic '[en eso, un momento, consultando CloudISP]'
 cfg onboarding.seen.busy_input_prompt true
 cfg onboarding.seen.tool_progress_prompt true
 
-echo "host-setup: listo. Plugin enlazado en $HERMES_HOME_DIR/plugins/cloudisp; reiniciá hermes-gateway SÓLO sin turnos ni delegaciones en curso."
+echo "host-setup: listo. Plugin enlazado en $HERMES_HOME_DIR/plugins/cloudisp; reiniciá hermes-gateway SÓLO sin turnos ni delegaciones en curso y verificá el arranque: grep -h CLOUDISP_PLUGIN_READY ~/.hermes/logs/gateway.log (patches=ok), sin CLOUDISP_PATCH_FAILED en errors.log."

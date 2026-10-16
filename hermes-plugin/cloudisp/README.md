@@ -9,7 +9,7 @@ verificó contra Hermes **v0.22.0+139 (`79651b7`)**; `requires_hermes: ">=0.22"`
 | Corte por cupo | El mismo hook consulta `GET /agent/usage/status` (cache de 60 s por perfil). `exhausted` → «⛔ Se agotó el cupo…» y no se llama al modelo; un error del admin deja pasar el mensaje (el corte duro lo da el ledger). |
 | Aviso al 80 % | `transform_llm_output` agrega «⚠️ … más del 80 % del cupo…» a la próxima respuesta, una vez por período (marca en `~/.cache/cloudisp-plugin/warned-*`). |
 | `/guia` | `register_command`: devuelve `guia.md` (generada por `npm run guide`) sin pasar por el modelo. |
-| Identidad del operador | `pre_tool_call` (`modify`) agrega `_operator` a toda llamada al MCP, desde las variables de sesión. Sin usuario → `_operator: null` (el MCP rechaza la escritura). |
+| Identidad del operador (falla cerrado) | `pre_tool_call` (`modify`) **pisa** el `_operator` de toda llamada al MCP con el de la sesión (o con `null` si no hay usuario válido); nada de lo que mande el modelo sobrevive. La puerta de aprobación vuelve a derivar el operador por su cuenta y **bloquea** la escritura si no puede («No pude identificar quién pide esta acción…»). Un error en cualquiera de los dos callbacks bloquea las escrituras (aviso en español) y deja salir las lecturas sin operador; queda `CLOUDISP_GUARD_ERROR` en el log. Un MCP con `CLOUDISP_REQUIRE_OPERATOR=1` rechaza además toda escritura sin operador. |
 | Aprobación en español | `pre_tool_call` (`approve`): «✍️ Confirmá: <acción> — <argumentos>», con `rule_key` nueva por llamada. La tarjeta de Telegram se reescribe (parche, ver abajo): título «Necesito tu confirmación para esta acción», la acción en español en el recuadro, «Detalle: …», sólo **✅ Aprobar** y **❌ Denegar**. Los subagentes que escriben reciben `block`. |
 | Un «no» es definitivo | `post_approval_response` anota la confirmación denegada, vencida o cancelada; en ese mismo turno cualquier escritura recibe `block` («No la reintentes…»). Sólo un mensaje nuevo del operador abre otro turno. |
 | Consumo | `post_api_request` y `post_auxiliary_call`: `POST /agent/usage` desde un thread (3 s); si falla, cola `usage-spool-<perfil>.jsonl` y reintento (máx. 50) en el siguiente. |
@@ -46,7 +46,7 @@ plugin. Con el plugin cargado pero sin `write_tools.json` el registro falla (no 
 | `pre_gateway_dispatch(event, gateway, session_store)` | Existe y corre **antes** de la autenticación (`gateway/run_inbound.py::_hm_admit_event`). `event.get_command()` ya devuelve el comando en minúscula y sin `@bot`. En multiplex corre con el home del **host**, no el del perfil. |
 | Enviar con `gateway._delivery_adapter_for(source)` | Existe, pero **no se usa**: como el hook corre antes de auth, enviar desde ahí le contestaría a desconocidos. En su lugar el hook devuelve `rewrite` hacia comandos propios (`/cloudisp-blocked`, `/cloudisp-quota`): la respuesta sigue el camino normal y sólo llega a usuarios autorizados. |
 | `ctx.register_command` | Existe: `register_command(name, handler, description, args_hint)`; el handler recibe `raw_args` y devuelve `str`; se despacha sin modelo, con las variables de sesión ya puestas. Rechaza nombres que choquen con comandos del motor (`guia` no choca). |
-| `pre_tool_call` `modify` llega al MCP | **Sí**: `agent/tool_executor.py` ejecuta con los args modificados y `registry.dispatch` no valida contra el schema. Cada callback devuelve **una** directiva, por eso hay dos callbacks (`modify` y `approve`/`block`). Una excepción del hook no bloquea la llamada (por eso la identidad es fail-closed en el MCP). |
+| `pre_tool_call` `modify` llega al MCP | **Sí**: `agent/tool_executor.py` ejecuta con los args modificados y `registry.dispatch` no valida contra el schema. Cada callback devuelve **una** directiva, por eso hay dos callbacks (`modify` y `approve`/`block`). En esta versión una excepción o un timeout de un callback de `pre_tool_call` ya se convierte en `block` (`plugins_dispatch.PluginDispatchMixin.invoke_hook`, `_HOOK_TIMEOUT_FAIL_CLOSED_HOOKS = {"pre_tool_call"}`, con un mensaje en inglés); el plugin bloquea igual por su cuenta, en español y sin depender de la versión. El callback corre en un thread con una copia del contexto, así que `get_session_env` ve al usuario. Los dos callbacks reciben los mismos `args` del modelo (el `modify` se aplica recién después). |
 | Prefijo de las herramientas MCP | `mcp__<servidor>__<herramienta>` (`tools/mcp_tool_schema.py`). |
 | Detección de subagente | Los kwargs de `pre_tool_call` son `tool_name, args, task_id, session_id, tool_call_id, turn_id, api_request_id`: **no hay `parent_session_id`**, y `HERMES_SESSION_SOURCE` no vale `subagent`. Se usa `subagent_start(child_session_id)` y `agent.delegation_context.is_delegated_child_context()` (el predicado que usa el propio motor). |
 | `approve` muestra la tarjeta con botones | **Sí**: `request_tool_approval` → `send_exec_approval`; Telegram dibuja botones y el texto es el `message`. **Pero** el motor la arma sin que se pueda configurar: encabezado «Hermes quiere ejecutar un comando…» (cambia con la clave `gateway.exec_approval.header` del pack), un recuadro con `<mcp__cloudisp__herramienta> (plugin approval rule)` (nombre interno) y los botones «sesión» y «siempre» (`allow_session`/`allow_permanent` van fijos en `True`; no hay clave ni cadena que los oculte, y una etiqueta vacía rompe el botón). Por eso el parche de `send_exec_approval`. `/yolo` y `approvals.mode: off` saltean la tarjeta: `/yolo` queda bloqueado por el allowlist. |
@@ -81,15 +81,40 @@ Research)…», `Active Hermes profile: … /home/hermes/…`, el trailer `Model
 ## Parches
 
 El plugin parchea dos funciones del runtime **en memoria** (sin tocar los archivos de Hermes), una sola vez y con guarda: si el
-destino cambia o no existe, registra un warning y el runtime sigue con su texto, nunca se cae.
+destino cambia o no existe, el runtime sigue con su texto y nunca se cae, pero **el fallo no pasa en silencio** (ver «Salud y arranque»).
+Antes de parchear se comprueba que el destino siga siendo lo que se espera (que `send_exec_approval` siga siendo una corrutina con los
+mismos parámetros), y después que el parche tenga efecto (`mark_recommended` se prueba de punta a punta con la tarjeta de `clarify`; un
+adaptador de Telegram que sobreescriba `send_exec_approval` se saltearía el parche y también cuenta como fallo).
 
 | Parche | Qué hace | Si falla |
 | --- | --- | --- |
-| `tools.clarify_tool.mark_recommended` → identidad | Las opciones de `clarify` salen tal cual («✅ Confirmar», sin «(Recommended)»). La limpieza de la respuesta del usuario sigue funcionando. | Aparece «(Recommended)». |
-| `gateway.platforms.base.BasePlatformAdapter.send_exec_approval` envuelto | Sólo si el comando es `<mcp__…> (plugin approval rule)` y la descripción empieza con «✍️ Confirmá: »: pone la acción y el detalle en español y pasa `allow_session=False`, `allow_permanent=False` (quedan Aprobar y Denegar). Cualquier otra aprobación sigue igual. | Tarjeta con el nombre interno y cuatro botones. |
+| `mark_recommended`: `tools.clarify_tool.mark_recommended` → identidad | Las opciones de `clarify` salen tal cual («✅ Confirmar», sin «(Recommended)»). La limpieza de la respuesta del usuario sigue funcionando. | Aparece «(Recommended)». |
+| `send_exec_approval`: `gateway.platforms.base.BasePlatformAdapter.send_exec_approval` envuelto | Sólo si el comando es `<mcp__…> (plugin approval rule)` y la descripción empieza con «✍️ Confirmá: »: pone la acción y el detalle en español y pasa `allow_session=False`, `allow_permanent=False` (quedan Aprobar y Denegar). Cualquier otra aprobación sigue igual. | Tarjeta con el nombre interno y cuatro botones. |
 
 Verificados contra el código real de CT 108 (`BasePlatformAdapter` renderizando la tarjeta con el pack y el parche: «⚠️ Necesito tu confirmación…
 / Reiniciar la ONU / Detalle: Abonado: 2861», botones Aprobar y Denegar), pero no dentro de un gateway vivo. Si una actualización de Hermes los rompe, la matriz de pruebas lo muestra en G8/G9.
+
+## Salud y arranque
+
+Cada vez que el motor carga el plugin (una vez por home: el del host y el de cada perfil) `register` escribe **una** línea de salud, la
+última, con el estado de los parches:
+
+```
+CLOUDISP_PLUGIN_READY patches=ok version=0.5.0 write_tools=19 middleware=ok locale=ok profile=cloudisp-nvs
+CLOUDISP_PLUGIN_READY patches=failed:mark_recommended,send_exec_approval version=0.5.0 ...
+```
+
+Nivel `INFO` si todo está bien; `WARNING` si faltó el middleware o el pack de textos; `ERROR` si algún parche falló. Cada parche que no
+se pudo aplicar deja además, a `ERROR`, `CLOUDISP_PATCH_FAILED <mark_recommended|send_exec_approval> reason=<Excepción>: <motivo>`, y un
+error de los callbacks de identidad o aprobación deja `CLOUDISP_GUARD_ERROR stage=<identity|gate> tool=<herramienta> error=<…>`.
+
+El plugin loguea con `logging.getLogger(__name__)`: bajo el runtime es `hermes_plugins.cloudisp…`, el prefijo que el filtro de
+`gateway.log` deja pasar (un logger llamado a secas `cloudisp` sólo llegaría a `agent.log`). Revisión de aceptación:
+
+```bash
+grep -h "CLOUDISP_PLUGIN_READY" ~/.hermes/logs/gateway.log ~/.hermes/profiles/cloudisp-*/logs/gateway.log | tail -n 4   # patches=ok en cada uno
+grep -h "CLOUDISP_PATCH_FAILED\|CLOUDISP_GUARD_ERROR" ~/.hermes/logs/errors.log ~/.hermes/profiles/cloudisp-*/logs/errors.log  # no debe haber nada
+```
 
 ## Límites conocidos
 
@@ -98,7 +123,11 @@ Verificados contra el código real de CT 108 (`BasePlatformAdapter` renderizando
 - Un operador por turno: la identidad sale de las variables de sesión del turno.
 - El pack de textos reemplaza el idioma `es` y `en` de todo el proceso (el host `default` también lo ve).
 - `transform_llm_output` no alcanza el texto que ya se envió en streaming parcial; la regla principal está en el SOUL.
-- Un `_operator` falsificado por el modelo se pisa siempre (con `null` si la sesión no tiene usuario), salvo que el hook falle.
+- Un `_operator` falsificado por el modelo se pisa siempre y, si la identidad no se puede derivar, la escritura se bloquea. Sin el plugin cargado
+  nada lo pisa: el MCP sólo puede comprobar que el operador **exista** (`CLOUDISP_REQUIRE_OPERATOR=1`), no que sea auténtico, y con `trust: full`
+  tampoco habría tarjeta de aprobación. Por eso el plugin tiene que estar habilitado en el host y en el perfil (ver la línea `CLOUDISP_PLUGIN_READY`).
+- En un fallo de los callbacks las lecturas salen sin operador sólo si la herramienta es del servidor MCP con el nombre por defecto (`cloudisp`);
+  una escritura con nombre de herramienta de CloudISP se bloquea sea cual sea el servidor.
 
 ## Pruebas
 
