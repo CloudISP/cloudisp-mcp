@@ -51,7 +51,7 @@ Fase F of the commercial plan. The matrix is the same one as [the baseline](2026
 |---|---|---|
 | G9 | 03:45 | ONU reboot, task 6046 |
 | G15 | 04:04 | PPPoE kick |
-| G16 | 04:10 | OT-2026-000020 created; cancelled afterwards in the admin |
+| G16 | 04:10 | OT-2026-000020 created; cancelled afterwards in the admin, then deleted at Ignacio's request (`platform:demo-cleanup --platform-tree=3 --work-orders=45 --apply`, run `fc7336d7`: the OT and its 2 history rows, incl. `work_order_history` 155, are gone; cache invalidation enqueued). The `api_request_log` row of the create (04:10:30) remains |
 
 ## Known limits
 
