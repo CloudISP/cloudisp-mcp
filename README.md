@@ -354,6 +354,23 @@ arrancar deja en el log la línea `CLOUDISP_PLUGIN_READY patches=ok …` (o
 crea el perfil `cloudisp-<cliente>` con toda la configuración. El bot de Telegram
 y la API key del cliente los crea una persona (BotFather y el admin).
 
+Los dos scripts respetan `HERMES_HOME` (la variable de Hermes; si apunta a un perfil
+usan su raíz) y fijan el home del host con `hermes -p default`, así que se pueden probar
+sin tocar el host real:
+
+```bash
+S=/tmp/sandbox   # un `op` falso en $S/bin (que imprima valores de mentira) y un perfil
+mkdir -p $S/bin $S/home $S/cfg $S/hermes/profiles/cloudisp-src   # cloudisp-src/.env con OPENCODE_GO_API_KEY=FAKE
+env -i PATH="$S/bin:$PATH" HOME=$S/home HERMES_HOME=$S/hermes CLOUDISP_MCP_CONFIG_DIR=$S/cfg \
+    CLOUDISP_API_BASE=https://sandbox.invalid SOURCE_PROFILE=cloudisp-src \
+    deploy/hermes-tenant/new-tenant.sh prueba "Cliente de Prueba" op://x/token/c op://x/key/c 123456789
+```
+
+Con un `HERMES_HOME` que no es el del host, el primer `hermes` arma su propio entorno de
+dependencias en esa raíz (unos 80 s, ~400 MB y red); en el host de producción no pasa.
+`HOME` también va al sandbox: el alias `cloudisp-<cliente>` se crea en `~/.local/bin` y el
+directorio de informes en `~/.cache/cloudisp-artifacts`.
+
 ## Desinstalar
 
 1. Quitá el registro: `claude mcp remove --scope user cloudisp`,

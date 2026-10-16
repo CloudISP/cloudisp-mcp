@@ -13,7 +13,7 @@
 # La configuración se aplica con `hermes -p <perfil> config set`; no se reescribe ningún YAML.
 # El bot de Telegram y el api_client los crea una persona (BotFather y un master admin del admin).
 #
-# Variables opcionales: HERMES_HOME_DIR, CLOUDISP_MCP_HOME, CLOUDISP_MCP_CONFIG_DIR, CLOUDISP_API_BASE,
+# Variables opcionales: HERMES_HOME (la raíz de hermes; también se respeta HERMES_HOME_DIR), CLOUDISP_MCP_HOME, CLOUDISP_MCP_CONFIG_DIR, CLOUDISP_API_BASE,
 # SOURCE_PROFILE (perfil del que se copia OPENCODE_GO_API_KEY, por defecto cloudisp-nvs), BOT_NAME.
 set -euo pipefail
 umask 077
@@ -29,7 +29,15 @@ SLUG="$1"; TENANT="$2"; TOKEN_REF="$3"; KEY_REF="$4"; TG_USER="${5:-}"
 [[ -z "$TG_USER" || "$TG_USER" =~ ^[0-9]{3,15}$ ]] || die "el id de Telegram es numérico"
 
 PROFILE="cloudisp-$SLUG"
-HERMES_HOME_DIR="${HERMES_HOME_DIR:-$HOME/.hermes}"
+# Raíz de Hermes: HERMES_HOME_DIR si se pasa; si no, la variable que usa el propio hermes (HERMES_HOME; si apunta a un perfil,
+# su raíz); si no, ~/.hermes. Así el script y `hermes` hablan del mismo lugar.
+hermes_root() {
+    local home="${HERMES_HOME:-$HOME/.hermes}"
+
+    [ "$(basename "$(dirname "$home")")" = profiles ] && home="$(dirname "$(dirname "$home")")"
+    printf '%s' "$home"
+}
+HERMES_HOME_DIR="${HERMES_HOME_DIR:-$(hermes_root)}"
 MCP_HOME="${CLOUDISP_MCP_HOME:-$HOME/.local/share/cloudisp-mcp}"
 CFG_DIR="${CLOUDISP_MCP_CONFIG_DIR:-$HOME/.config/cloudisp-mcp}"
 API_BASE="${CLOUDISP_API_BASE:-https://admin.cloudisp.com.ar}"
@@ -49,8 +57,10 @@ SOURCE_ENV="$HERMES_HOME_DIR/profiles/$SOURCE_PROFILE/.env"
 grep -q '^OPENCODE_GO_API_KEY=.' "$SOURCE_ENV" 2>/dev/null || die "no encuentro OPENCODE_GO_API_KEY en $SOURCE_ENV"
 
 # Secretos: sólo en variables del script y en archivos 600.
-BOT_TOKEN="$(op read "$TOKEN_REF")"; [ -n "$BOT_TOKEN" ] || die "op read del token del bot no devolvió nada"
-API_KEY="$(op read "$KEY_REF")"; [ -n "$API_KEY" ] || die "op read de la API key no devolvió nada"
+BOT_TOKEN="$(op read "$TOKEN_REF")" || die "op read del token del bot falló (¿hay sesión de 1Password?)"
+[ -n "$BOT_TOKEN" ] || die "op read del token del bot no devolvió nada"
+API_KEY="$(op read "$KEY_REF")" || die "op read de la API key falló (¿hay sesión de 1Password?)"
+[ -n "$API_KEY" ] || die "op read de la API key no devolvió nada"
 MODEL_KEY="$(grep '^OPENCODE_GO_API_KEY=' "$SOURCE_ENV" | head -n 1 | cut -d= -f2-)"
 
 hermes profile create "$PROFILE" --no-skills --description "Asistente CloudISP $TENANT" >/dev/null
@@ -135,8 +145,10 @@ cfg onboarding.seen.tool_progress_prompt true
 
 echo "new-tenant: perfil $PROFILE creado ($PROFILE_DIR) y entorno del MCP en $ENV_FILE (modo 600)."
 echo "Falta a mano:"
-echo "  1. BotFather: nombre \"$BOT_NAME · $TENANT\" y foto (/setuserpic con el logo de CloudISP)."
-[ -n "$TG_USER" ] || echo "  2. Completar TELEGRAM_ALLOWED_USERS y TELEGRAM_HOME_CHANNEL en $PROFILE_DIR/.env (id numérico del usuario autorizado)."
-echo "  3. host-setup.sh una vez por host (plugin y claves del gateway) y la KB del cliente en el admin."
-echo "  4. Reiniciar hermes-gateway SÓLO sin turnos ni delegaciones en curso."
-echo "  5. Verificar el arranque: grep -h CLOUDISP_PLUGIN_READY ~/.hermes/logs/gateway.log \"$PROFILE_DIR/logs/gateway.log\" (patches=ok) y que no haya CLOUDISP_PATCH_FAILED en errors.log."
+step=0
+todo() { step=$((step + 1)); echo "  $step. $*"; }
+todo "BotFather: nombre \"$BOT_NAME · $TENANT\" y foto (/setuserpic con el logo de CloudISP)."
+[ -n "$TG_USER" ] || todo "Completar TELEGRAM_ALLOWED_USERS y TELEGRAM_HOME_CHANNEL en $PROFILE_DIR/.env (id numérico del usuario autorizado)."
+todo "host-setup.sh una vez por host (plugin y claves del gateway) y la KB del cliente en el admin."
+todo "Reiniciar hermes-gateway SÓLO sin turnos ni delegaciones en curso."
+todo "Verificar el arranque: grep -h CLOUDISP_PLUGIN_READY ~/.hermes/logs/agent.log ~/.hermes/logs/gateway.log (patches=ok) y que no haya CLOUDISP_PATCH_FAILED en errors.log."

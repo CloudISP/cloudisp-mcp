@@ -115,7 +115,7 @@ El plugin loguea con `logging.getLogger(__name__)`: bajo el runtime es `hermes_p
 `gateway.log` deja pasar (un logger llamado a secas `cloudisp` sólo llegaría a `agent.log`). Revisión de aceptación:
 
 ```bash
-grep -h "CLOUDISP_PLUGIN_READY" ~/.hermes/logs/gateway.log ~/.hermes/profiles/cloudisp-*/logs/gateway.log | tail -n 4   # patches=ok en cada uno
+grep -h "CLOUDISP_PLUGIN_READY" ~/.hermes/logs/{agent,gateway}.log ~/.hermes/profiles/cloudisp-*/logs/{agent,gateway}.log 2>/dev/null | tail -n 4   # patches=ok en cada uno (un comando `hermes` también la deja en agent.log)
 grep -h "CLOUDISP_PATCH_FAILED\|CLOUDISP_GUARD_ERROR" ~/.hermes/logs/errors.log ~/.hermes/profiles/cloudisp-*/logs/errors.log  # no debe haber nada
 ```
 

@@ -6,13 +6,21 @@
 # El gateway multiplexado atiende a todos los perfiles desde el home del host: lee de acá el menú de
 # Telegram, la presentación del chat, la política de archivos y los plugins que ven los mensajes
 # entrantes (comandos, cupo, /new). Cada bot tiene además su perfil (new-tenant.sh).
-# Variables opcionales: CLOUDISP_MCP_HOME, HOST_PLUGINS (lista de plugins del host, por defecto "omh cloudisp").
+# Variables opcionales: HERMES_HOME (la raíz de hermes; también se respeta HERMES_HOME_DIR), CLOUDISP_MCP_HOME, HOST_PLUGINS (lista de plugins del host, por defecto "omh cloudisp").
 set -euo pipefail
 
 die() { echo "host-setup: $*" >&2; exit 1; }
 
 MCP_HOME="${CLOUDISP_MCP_HOME:-$HOME/.local/share/cloudisp-mcp}"
-HERMES_HOME_DIR="${HERMES_HOME_DIR:-$HOME/.hermes}"
+# Raíz de Hermes: HERMES_HOME_DIR si se pasa; si no, la variable que usa el propio hermes (HERMES_HOME; si apunta a un perfil,
+# su raíz); si no, ~/.hermes. Así el script y `hermes` hablan del mismo lugar.
+hermes_root() {
+    local home="${HERMES_HOME:-$HOME/.hermes}"
+
+    [ "$(basename "$(dirname "$home")")" = profiles ] && home="$(dirname "$(dirname "$home")")"
+    printf '%s' "$home"
+}
+HERMES_HOME_DIR="${HERMES_HOME_DIR:-$(hermes_root)}"
 HOST_PLUGINS="${HOST_PLUGINS:-omh cloudisp}"
 ARTIFACTS="$HOME/.cache/cloudisp-artifacts"
 
@@ -24,7 +32,8 @@ if grep -q '^TELEGRAM_BOT_TOKEN=' "$HERMES_HOME_DIR/.env" 2>/dev/null; then
     die "$HERMES_HOME_DIR/.env define TELEGRAM_BOT_TOKEN: sacá esa línea a mano (el bot vive en el perfil)"
 fi
 
-cfg() { hermes config set "$@" >/dev/null; }
+# `-p default` fija el home del host aunque haya un perfil activo (`hermes profile use`) o HERMES_HOME apunte a un perfil.
+cfg() { hermes -p default config set "$@" >/dev/null; }
 
 mkdir -p "$HERMES_HOME_DIR/plugins" "$ARTIFACTS"
 chmod 700 "$ARTIFACTS"
@@ -53,4 +62,4 @@ cfg display.status_phrases.generic '[en eso, un momento, consultando CloudISP]'
 cfg onboarding.seen.busy_input_prompt true
 cfg onboarding.seen.tool_progress_prompt true
 
-echo "host-setup: listo. Plugin enlazado en $HERMES_HOME_DIR/plugins/cloudisp; reiniciá hermes-gateway SÓLO sin turnos ni delegaciones en curso y verificá el arranque: grep -h CLOUDISP_PLUGIN_READY ~/.hermes/logs/gateway.log (patches=ok), sin CLOUDISP_PATCH_FAILED en errors.log."
+echo "host-setup: listo. Plugin enlazado en $HERMES_HOME_DIR/plugins/cloudisp; reiniciá hermes-gateway SÓLO sin turnos ni delegaciones en curso y verificá el arranque: grep -h CLOUDISP_PLUGIN_READY ~/.hermes/logs/agent.log ~/.hermes/logs/gateway.log (patches=ok), sin CLOUDISP_PATCH_FAILED en errors.log."
