@@ -69,6 +69,14 @@ def test_a_path_is_not_a_command(env, quota):
     assert core.pre_gateway_dispatch(Event("/home/hermes/x revisá esto")) is None
 
 
+def test_guia_has_only_markup_the_telegram_adapter_renders(env):
+    text = core.guia_command("")
+
+    assert "_" not in text, "the adapter escapes underscores, so an italic written with them shows raw"
+    assert "*" not in re.sub(r"\*\*[^*\n]+\*\*", "", text), "every asterisk is part of a **bold** pair"
+    assert all(re.fullmatch(r"• \*\*[^*]+\*\*( ✍️)? — ejemplo: «[^«»]+»", line) for line in text.splitlines() if line.startswith("• "))
+
+
 def test_guia_answers_the_catalogue_with_the_bot_and_the_tenant(env):
     text = core.guia_command("")
 

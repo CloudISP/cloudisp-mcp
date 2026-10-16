@@ -2315,3 +2315,20 @@ test('the SOUL template: a denial is final for the turn, off-topic requests are 
         assert.ok(numbers[index] === numbers[index - 1] + 1 || numbers[index] === 1, `rule numbering around ${numbers[index]}`);
     }
 });
+
+test('the guide markup survives the Telegram adapter: only **bold** pairs, no underscores, examples between « »', () => {
+    const guide = renderGuide(guideCatalog());
+    // `{bot_name}` and `{tenant_name}` are the only underscores allowed: the plugin replaces them before sending.
+    const sent = guide.replace('{bot_name}', 'Asistente CloudISP').replace('{tenant_name}', 'NVS InterService');
+
+    assert.equal(sent.includes('_'), false, 'the adapter escapes underscores: an italic written with them shows raw');
+    assert.equal(sent.replace(/\*\*[^*\n]+\*\*/g, '').includes('*'), false, 'every asterisk belongs to a **bold** pair');
+
+    const examples = sent.split('\n').filter((line) => line.startsWith('• '));
+
+    assert.equal(examples.length, guideCatalog().filter((tool) => !tool.guide.hidden).length);
+
+    for (const line of examples) {
+        assert.match(line, /^• \*\*[^*]+\*\*( ✍️)? — ejemplo: «[^«»]+»$/, line);
+    }
+});
