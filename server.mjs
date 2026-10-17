@@ -750,8 +750,21 @@ async function disconnectSubscriber(args, fetchImpl) {
     return { ...result, work_order: workOrder.body };
 }
 
+/** Work-order statuses `GET /work-orders` filters by (the model's own vocabulary). */
+const WORK_ORDER_STATUSES = ['pending', 'in_progress', 'incomplete', 'completed', 'cancelled'];
+
+/** Target statuses `POST /work-orders/{id}/status` accepts; the manager-only reopen is not exposed. */
+const WORK_ORDER_STATUS_TARGETS = ['in_progress', 'completed', 'cancelled'];
+
+/** Work-order priorities `GET /work-orders` filters by. */
+const WORK_ORDER_PRIORITIES = ['low', 'medium', 'high'];
+
+/** Longest cancellation reason the status route accepts. */
+const WORK_ORDER_REASON_MAX_LENGTH = 500;
+
 /**
- * `find_work_orders` — optional subscriber (`subscriber_id` or `subscriber_query`), optional `type`/`status`.
+ * `find_work_orders` — optional subscriber (`subscriber_id` or `subscriber_query`), optional
+ * `type`/`status`/`priority`/`assigned_to`/`scheduled_from`/`scheduled_to`/`overdue`.
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
@@ -761,7 +774,17 @@ async function findWorkOrders(args, fetchImpl) {
     const clientId = await resolveSubscriberId(fetchImpl, args, { optional: true });
 
     return call(fetchImpl, 'GET', '/work-orders', {
-        query: { client_id: clientId, type: asTrimmedString(args.type), status: asTrimmedString(args.status), ...pageQuery(args) },
+        query: {
+            client_id: clientId,
+            type: asTrimmedString(args.type),
+            status: optEnum(args, 'status', WORK_ORDER_STATUSES),
+            priority: optEnum(args, 'priority', WORK_ORDER_PRIORITIES),
+            assigned_to: optInt(args, 'assigned_to'),
+            scheduled_from: asTrimmedString(args.scheduled_from),
+            scheduled_to: asTrimmedString(args.scheduled_to),
+            overdue: optFlag(args, 'overdue'),
+            ...pageQuery(args),
+        },
     });
 }
 
@@ -822,6 +845,41 @@ async function assignWorkOrder(args, fetchImpl) {
         : (await findSingleEmployee(fetchImpl, technicianQuery)).id;
 
     return call(fetchImpl, 'POST', `/work-orders/${workOrderId}/assign`, { body: { employee_id: employeeId }, idempotencyKey });
+}
+
+/**
+ * `update_work_order_status` — `POST /work-orders/{id}/status`.
+ *
+ * The server's transition table decides: only `in_progress`, `completed` (non-installations) and
+ * `cancelled` (with a reason) are reachable, and an installation never completes this way.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function updateWorkOrderStatus(args, fetchImpl) {
+    const idempotencyKey = requireIdempotencyKey(args);
+    const workOrderId = requireId(args, 'work_order_id');
+    const status = optEnum(args, 'status', WORK_ORDER_STATUS_TARGETS);
+
+    if (status === undefined) {
+        fail(invalid(`status is required and must be one of: ${WORK_ORDER_STATUS_TARGETS.join(', ')}.`));
+    }
+
+    const reason = asTrimmedString(args.reason);
+
+    if (status === 'cancelled' && reason === '') {
+        fail(invalid('reason is required to cancel a work order: ask the operator why before calling.'));
+    }
+
+    if (reason.length > WORK_ORDER_REASON_MAX_LENGTH) {
+        fail(invalid(`reason is at most ${WORK_ORDER_REASON_MAX_LENGTH} characters.`));
+    }
+
+    return call(fetchImpl, 'POST', `/work-orders/${workOrderId}/status`, {
+        body: reason === '' ? { status } : { status, reason },
+        idempotencyKey,
+    });
 }
 
 /**
@@ -2686,11 +2744,18 @@ const TOOLS = [
         'find_work_orders',
         'Buscar órdenes de trabajo',
         'List work orders, optionally of one subscriber (subscriber_id, or a subscriber_query that matches exactly one subscriber, otherwise '
-        + 'the candidates are returned and nothing is listed), plus optional type and status.',
+        + 'the candidates are returned and nothing is listed), plus optional type, status, priority, assigned_to (employee id), scheduled_from / '
+        + 'scheduled_to (dates YYYY-MM-DD over scheduled_at, inclusive) and overdue (true: appointment in the past and the order not finished). '
+        + 'Each row carries created_by {id, name}, the seller the installation contract prints.',
         {
             ...SUBSCRIBER_PROPERTIES,
             type: { type: 'string', description: 'Work order type filter, e.g. installation, technical_visit.' },
-            status: { type: 'string', description: 'Work order status filter, e.g. pending, in_progress, completed, cancelled.' },
+            status: { type: 'string', enum: WORK_ORDER_STATUSES, description: 'Work order status filter.' },
+            priority: { type: 'string', enum: WORK_ORDER_PRIORITIES, description: 'Work order priority filter.' },
+            assigned_to: { type: 'integer', description: 'Only the orders assigned to this employee id (from find_technician).' },
+            scheduled_from: { type: 'string', description: 'Appointments on or after this date, YYYY-MM-DD.' },
+            scheduled_to: { type: 'string', description: 'Appointments on or before this date, YYYY-MM-DD. Give it together with scheduled_from for a range.' },
+            overdue: { type: 'boolean', description: 'true: only the orders whose appointment passed and that are neither completed nor cancelled.' },
             page: { type: 'integer', description: 'Page number, from 1.' },
             per_page: { type: 'integer', description: 'Rows per page (API maximum 100).' },
         },
@@ -2699,7 +2764,8 @@ const TOOLS = [
     readTool(
         'get_work_order',
         'Ver orden de trabajo',
-        'Fetch one work order by id.',
+        'Fetch one work order by id, with its timeline: the newest 50 history events and the newest 50 comments (newest first; each comment body '
+        + 'is cut at 500 characters and flagged truncated). History entries carry the transition (from_status, to_status), who did it and when.',
         { work_order_id: { type: 'integer', description: 'Work order id.' } },
         getWorkOrder,
         ['work_order_id'],
@@ -2954,6 +3020,21 @@ const TOOLS = [
         },
         [],
         assignWorkOrder,
+    ),
+    writeTool(
+        'update_work_order_status',
+        'Cambiar el estado de una orden de trabajo',
+        'Change a work order\'s status (POST /work-orders/{id}/status): in_progress to start a pending order, completed to finish a non-installation order, '
+        + 'cancelled with a reason. Only the transitions the server allows are accepted; anything else answers illegal_transition and changes nothing. '
+        + 'An installation is NEVER completed this way: it closes from the installation closing form (seal number required), so that call answers validation_failed. '
+        + 'Asking for the status the order already has returns replayed true and changes nothing.',
+        {
+            work_order_id: { type: 'integer', description: 'Work order id, from find_work_orders or create_work_order.' },
+            status: { type: 'string', enum: WORK_ORDER_STATUS_TARGETS, description: 'Target status: in_progress, completed or cancelled.' },
+            reason: { type: 'string', description: 'Required to cancel: why the order is cancelled, at most 500 characters. Ask the operator.' },
+        },
+        ['work_order_id', 'status'],
+        updateWorkOrderStatus,
     ),
     writeTool(
         'set_onu_admin_state',

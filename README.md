@@ -160,7 +160,7 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `get_account_statement` | `GET /subscribers/{id}/account-statement` (deuda por moneda y asientos) | `invoices:read` | lectura |
 | `list_debtors` | `GET /collections/debtors` (`currency`: `ARS`, `USD`; `q`) | `invoices:read` | lectura |
 | `list_cutoffs` | `GET /collections/cutoffs` · `/subscribers/{id}/cutoffs` (`status`: `cut_off`, `active`; `history`) | `subscribers:read` | lectura |
-| `find_work_orders` · `get_work_order` | `GET /work-orders` · `/work-orders/{id}` | `work-orders:read` | lectura |
+| `find_work_orders` · `get_work_order` | `GET /work-orders` (`status`, `type`, `priority`, `assigned_to`, `scheduled_from`/`scheduled_to`, `overdue`) · `/work-orders/{id}` (con `created_by` y el timeline: historial y comentarios) | `work-orders:read` | lectura |
 | `find_technician` | `GET /employees?q=&assignable=1` | `employees:read` | lectura |
 | `network_snapshot` | `GET /operations/snapshot` (`platform_id` opcional) | `operations:read` | lectura |
 | `list_onu_models` | `GET /network/onu-models` | `network:read` | lectura |
@@ -182,6 +182,7 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `reconnect_subscriber` | `POST /subscribers/{id}/reconnect` | `subscribers:write` | escritura |
 | `create_work_order` | `POST /work-orders` | `work-orders:write` | escritura |
 | `assign_work_order` | `POST /work-orders/{id}/assign` | `work-orders:assign` | escritura |
+| `update_work_order_status` | `POST /work-orders/{id}/status` (`status`: `in_progress`, `completed` o `cancelled` con `reason`; las instalaciones no se completan así) | `work-orders:write` | escritura |
 | `set_onu_admin_state` | `POST /subscribers/{id}/onu/actions` (`olt.onu_admin_state`) | `devices:operate` | escritura |
 | `factory_reset_onu` | `POST /subscribers/{id}/onu/actions` (`onu.factory_reset`) | `devices:operate` | escritura, destructiva |
 | `optimize_wifi` | `POST /subscribers/{id}/onu/actions` (`onu.wifi_optimize`, `preview`/`apply`) | `devices:operate` | escritura |
@@ -277,6 +278,9 @@ responden `validation_failed` sin hacer ningún pedido:
   `filter_period=<from>,<to>`; el resto de los filtros del reporte van en `filters`,
   igual que en `run_report`.
 - `locate_new_onu`: `olt_id` (opcional) acota la búsqueda a una sola OLT.
+- `find_work_orders` (`status`, `priority` y `assigned_to` positivo) y
+  `update_work_order_status` (`status`: `in_progress`, `completed` o
+  `cancelled`; para cancelar, `reason` obligatorio de hasta 500 caracteres).
 
 Con `open_work_order`, `disconnect_subscriber` usa la `idempotency_key` como
 `external_ref` de la orden. La API acepta 100 caracteres como máximo: una clave

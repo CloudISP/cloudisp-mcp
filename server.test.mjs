@@ -64,7 +64,7 @@ const READ_TOOL_NAMES = [
 const WRITE_TOOL_NAMES = [
     'reboot_onu', 'set_onu_catv', 'change_subscriber_wifi', 'change_wifi_radio', 'sync_onu',
     'change_subscriber_plan', 'change_subscriber_bandwidth', 'disconnect_subscriber', 'reconnect_subscriber',
-    'create_work_order', 'assign_work_order',
+    'create_work_order', 'assign_work_order', 'update_work_order_status',
     'set_onu_admin_state', 'factory_reset_onu', 'optimize_wifi', 'restore_wifi', 'reprovision_onu', 'kick_pppoe',
     'locate_new_onu', 'swap_onu',
 ];
@@ -817,6 +817,92 @@ test('assign_installation no longer exists', async () => {
 
     assert.equal(result.error, 'unknown_tool');
     assert.equal(calls.length, 0);
+});
+
+test('update_work_order_status posts the target status once, with the reason only when there is one', async () => {
+    const { result, calls } = await run(
+        'update_work_order_status',
+        { ...WRITE_ARGS, idempotency_key: 'op-11', work_order_id: 7, status: 'cancelled', reason: '  El abonado pidió no instalar.  ' },
+        { 'POST /work-orders/7/status': jsonResponse({ success: true, data: { id: 7, status: 'cancelled', replayed: false } }) },
+    );
+
+    assert.deepEqual(result, { success: true, data: { id: 7, status: 'cancelled', replayed: false } });
+    assert.deepEqual(sig(calls), ['POST /work-orders/7/status']);
+    assert.deepEqual(calls[0].body, { status: 'cancelled', reason: 'El abonado pidió no instalar.' });
+    assert.equal(calls[0].headers['Idempotency-Key'], 'op-11');
+    assert.equal(calls[0].headers['X-CloudISP-Requested-By'], 'Marcos Rivadeo');
+
+    const started = await run(
+        'update_work_order_status',
+        { ...WRITE_ARGS, work_order_id: 8, status: 'in_progress' },
+        { 'POST /work-orders/8/status': jsonResponse({ success: true, data: { id: 8, status: 'in_progress', replayed: true } }) },
+    );
+    assert.deepEqual(started.calls[0].body, { status: 'in_progress' }, 'no reason is sent when the transition does not carry one');
+
+    const invalid = [
+        { status: 'cancelled' },
+        { status: 'cancelled', reason: 'x'.repeat(501) },
+        { status: 'done' },
+        { status: 'incomplete' },
+        { reason: 'faltó el estado' },
+    ];
+    for (const args of invalid) {
+        const refused = await run('update_work_order_status', { ...WRITE_ARGS, work_order_id: 7, ...args });
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.calls.length, 0);
+    }
+});
+
+test('update_work_order_status relays the installation refusal and the illegal transition of the API', async () => {
+    const installation = await run(
+        'update_work_order_status',
+        { ...WRITE_ARGS, work_order_id: 7, status: 'completed' },
+        { 'POST /work-orders/7/status': errorResponse(422, { code: 'validation_failed', message: 'Las instalaciones se cierran con el formulario de cierre (precinto obligatorio).' }) },
+    );
+    assert.equal(installation.result.outcome, 'validation_failed');
+    assert.match(installation.result.message, /precinto obligatorio/);
+
+    const jump = await run(
+        'update_work_order_status',
+        { ...WRITE_ARGS, work_order_id: 8, status: 'completed' },
+        { 'POST /work-orders/8/status': errorResponse(409, { code: 'illegal_transition', message: 'The resource cannot move to the requested lifecycle state.', details: { from: 'pending', to: 'completed' } }) },
+    );
+    assert.equal(jump.result.outcome, 'illegal_transition');
+    assert.deepEqual(jump.result.details, { from: 'pending', to: 'completed' });
+});
+
+test('find_work_orders passes the technician, priority, schedule and overdue filters', async () => {
+    const empty = jsonResponse({ success: true, data: [], meta: { total: 0 } });
+    const { calls } = await run(
+        'find_work_orders',
+        {
+            subscriber_id: 42, status: 'pending', priority: 'high', assigned_to: 9,
+            scheduled_from: '2026-05-01', scheduled_to: '2026-05-31', overdue: true, per_page: 50,
+        },
+        { 'GET /work-orders': empty },
+    );
+
+    assert.deepEqual(Object.fromEntries(calls[0].query), {
+        client_id: '42',
+        status: 'pending',
+        priority: 'high',
+        assigned_to: '9',
+        scheduled_from: '2026-05-01',
+        scheduled_to: '2026-05-31',
+        overdue: 'true',
+        per_page: '50',
+    });
+
+    const plain = await run('find_work_orders', { overdue: false }, { 'GET /work-orders': empty });
+    assert.deepEqual(Object.fromEntries(plain.calls[0].query), { overdue: 'false' }, 'the API reads false as "no overdue filter", like every other flag');
+
+    for (const args of [{ priority: 'urgent' }, { status: 'archived' }, { assigned_to: 0 }]) {
+        const refused = await run('find_work_orders', args);
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.calls.length, 0);
+    }
 });
 
 // ─── _operator ───────────────────────────────────────────────────────────────
@@ -2247,10 +2333,10 @@ test('the report tools are read-only and tell the agent to include the media lin
 
 const PLUGIN_DIR = new URL('./hermes-plugin/cloudisp/', import.meta.url);
 
-test('every tool carries a guide entry in one of the fixed categories, and the 59 tools are all there', () => {
+test('every tool carries a guide entry in one of the fixed categories, and the 60 tools are all there', () => {
     const catalog = guideCatalog();
 
-    assert.equal(catalog.length, 59);
+    assert.equal(catalog.length, 60);
 
     for (const tool of catalog) {
         assert.ok(tool.guide, `${tool.name} has no guide entry`);

@@ -60,6 +60,7 @@ Escribime en lenguaje natural; para un abonado usá su número, por ejemplo #123
 • **Ver una orden de trabajo** — ejemplo: «Mostrame la orden 5527»
 • **Crear una orden de trabajo** ✍️ — ejemplo: «Cargá una visita técnica para el #1234»
 • **Asignar una orden de trabajo** ✍️ — ejemplo: «Asigná la visita técnica del #1234 a Marcos»
+• **Cambiar el estado de una orden de trabajo** ✍️ — ejemplo: «Cancelá la orden 5527: el abonado no está»
 
 **Informes y gráficos**
 • **Ver qué informes hay** — ejemplo: «¿Qué informes me podés dar?»
