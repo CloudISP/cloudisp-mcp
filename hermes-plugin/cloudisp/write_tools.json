@@ -10,6 +10,7 @@
   "reconnect_subscriber": "Reconectar el servicio de un abonado",
   "create_work_order": "Crear una orden de trabajo",
   "assign_work_order": "Asignar una orden de trabajo",
+  "update_work_order_status": "Cambiar el estado de una orden de trabajo",
   "set_onu_admin_state": "Habilitar o deshabilitar la ONU en la OLT",
   "factory_reset_onu": "Restablecer la ONU de fábrica",
   "optimize_wifi": "Optimizar el WiFi",
