@@ -119,8 +119,9 @@ def test_new_tenant_configures_everything_through_hermes_config_set_on_its_own_p
     configured = [call for call in calls(sandbox) if " config set " in f" {call} "]
 
     assert calls(sandbox)[0].startswith("profile create cloudisp-acme --no-skills")
-    assert len(configured) == 33 and all(call.startswith("-p cloudisp-acme config set ") for call in configured)
+    assert len(configured) == 34 and all(call.startswith("-p cloudisp-acme config set ") for call in configured)
     assert "-p cloudisp-acme config set plugins.enabled [cloudisp]" in configured
+    assert "-p cloudisp-acme config set platforms.telegram.gateway_restart_notification false" in configured
     assert "-p cloudisp-acme config set mcp_servers.cloudisp.args ['acme']" in configured
 
 
@@ -177,7 +178,7 @@ def test_host_setup_configures_the_host_with_dash_p_default_and_links_the_plugin
     assert result.returncode == 0, result.stderr
     configured = calls(sandbox)
 
-    assert len(configured) == 18 and all(call.startswith("-p default config set ") for call in configured)
+    assert len(configured) == 19 and all(call.startswith("-p default config set ") for call in configured)
     assert "-p default config set plugins.enabled [omh, cloudisp]" in configured
     assert (sandbox["root"] / "plugins" / "cloudisp").is_symlink()
     assert not (sandbox["home"] / ".hermes").exists()

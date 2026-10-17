@@ -47,6 +47,8 @@ cfg gateway.media_delivery_allow_dirs "[$ARTIFACTS]"
 cfg platforms.telegram.extra.command_menu.priority_mode replace
 cfg platforms.telegram.extra.command_menu.priority '[guia, new]'
 cfg platforms.telegram.extra.command_menu.max_commands 2
+# Sin avisos de reinicio/apagado del motor: hay varios usuarios y no deben recibir ruido cuando se actualiza el servidor.
+cfg platforms.telegram.gateway_restart_notification false
 # Presentación del chat (el gateway la lee del host) y /new sin tarjeta de confirmación del motor.
 cfg display.language es
 cfg display.platforms.telegram.tool_progress new
