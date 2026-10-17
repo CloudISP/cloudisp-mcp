@@ -20,7 +20,7 @@ import { GUIDE } from './lib/guide.mjs';
 import { normalizeReport, renderReportHtml, ReportInputError, slugify } from './lib/report-html.mjs';
 
 const SERVER_NAME = 'cloudisp-mcp';
-const SERVER_VERSION = '0.5.2';
+const SERVER_VERSION = '0.5.3';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const API_PREFIX = '/api/v1/public';
 const REQUEST_TIMEOUT_MS = 30000;
@@ -561,7 +561,7 @@ async function searchSubscribers(fetchImpl, query) {
  * @return {Promise<object>} The single serialized employee row.
  */
 async function findSingleEmployee(fetchImpl, query) {
-    const response = await apiRequest(fetchImpl, 'GET', '/employees', { query: { q: query } });
+    const response = await apiRequest(fetchImpl, 'GET', '/employees', { query: { q: query, assignable: 1 } });
 
     if (!response.ok) {
         fail(apiFailurePayload(response));
@@ -766,7 +766,7 @@ async function findWorkOrders(args, fetchImpl) {
 }
 
 /**
- * `find_technician` — `GET /employees?q=`.
+ * `find_technician` — `GET /employees?q=&assignable=1`.
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
@@ -774,7 +774,7 @@ async function findWorkOrders(args, fetchImpl) {
  */
 async function findTechnician(args, fetchImpl) {
     const query = requireQuery(args.query);
-    const response = await apiRequest(fetchImpl, 'GET', '/employees', { query: { q: query } });
+    const response = await apiRequest(fetchImpl, 'GET', '/employees', { query: { q: query, assignable: 1 } });
 
     return isFailure(response) ? apiFailurePayload(response) : response.body;
 }
@@ -2590,7 +2590,7 @@ const TOOLS = [
     readTool(
         'find_technician',
         'Buscar técnico',
-        'Find active employees by name fragment. Use employee_id from the single result for assign_work_order.',
+        'Find technicians that assign_work_order accepts, by name fragment (each row has role). Use employee_id from the single result for assign_work_order.',
         { query: { type: 'string', description: 'Employee name fragment.' } },
         findTechnician,
         ['query'],

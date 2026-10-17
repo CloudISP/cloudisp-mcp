@@ -157,7 +157,7 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `list_plans` | `GET /plans` | `plans:read` | lectura |
 | `list_invoices` | `GET /invoices` (`status`: `draft`, `issued`, `void`) | `invoices:read` | lectura |
 | `find_work_orders` · `get_work_order` | `GET /work-orders` · `/work-orders/{id}` | `work-orders:read` | lectura |
-| `find_technician` | `GET /employees?q=` | `employees:read` | lectura |
+| `find_technician` | `GET /employees?q=&assignable=1` | `employees:read` | lectura |
 | `network_snapshot` | `GET /operations/snapshot` (`platform_id` opcional) | `operations:read` | lectura |
 | `list_onu_models` | `GET /network/onu-models` | `network:read` | lectura |
 | `subscriber_usage` | `GET /subscribers/{id}/usage` | `subscribers:read` | lectura |
