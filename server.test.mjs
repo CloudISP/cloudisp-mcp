@@ -58,6 +58,7 @@ const READ_TOOL_NAMES = [
     'get_work_order', 'find_technician', 'network_snapshot',
     'list_onu_models', 'subscriber_usage', 'usage_ranking', 'device_tasks', 'get_router', 'olt_poll_runs',
     'list_eoc_masters', 'live_traffic', 'export_report', 'build_report',
+    'get_invoice', 'get_account_statement', 'list_debtors', 'list_cutoffs',
 ];
 
 const WRITE_TOOL_NAMES = [
@@ -1055,7 +1056,7 @@ test('every write tool starts with the confirmation prefix and requires only ide
 test('every tool that takes a subscriber offers subscriber_id and subscriber_query', async () => {
     const tools = await listedTools({ CLOUDISP_ALLOW_WRITES: '1' });
     const bySubscriber = ['get_subscriber', 'diagnose_subscriber', 'onu_read', 'onu_diagnose', 'list_onus', 'list_invoices', 'find_work_orders',
-        'subscriber_usage', 'device_tasks', 'live_traffic', 'reboot_onu', 'set_onu_catv', 'change_subscriber_wifi', 'change_wifi_radio', 'sync_onu',
+        'subscriber_usage', 'device_tasks', 'live_traffic', 'get_account_statement', 'list_cutoffs', 'reboot_onu', 'set_onu_catv', 'change_subscriber_wifi', 'change_wifi_radio', 'sync_onu',
         'set_onu_admin_state', 'factory_reset_onu', 'optimize_wifi', 'restore_wifi', 'reprovision_onu', 'kick_pppoe', 'locate_new_onu', 'swap_onu',
         'change_subscriber_plan', 'change_subscriber_bandwidth', 'disconnect_subscriber', 'reconnect_subscriber', 'create_work_order', 'assign_work_order'];
 
@@ -2246,10 +2247,10 @@ test('the report tools are read-only and tell the agent to include the media lin
 
 const PLUGIN_DIR = new URL('./hermes-plugin/cloudisp/', import.meta.url);
 
-test('every tool carries a guide entry in one of the fixed categories, and the 55 tools are all there', () => {
+test('every tool carries a guide entry in one of the fixed categories, and the 59 tools are all there', () => {
     const catalog = guideCatalog();
 
-    assert.equal(catalog.length, 55);
+    assert.equal(catalog.length, 59);
 
     for (const tool of catalog) {
         assert.ok(tool.guide, `${tool.name} has no guide entry`);
@@ -2577,5 +2578,97 @@ test('M14: locate_new_onu narrows the search to one OLT with olt_id and sends {m
 
     for (const oltId of [0, -1, 1.5, 'x']) {
         await assertRefused('locate_new_onu', { ...args, olt_id: oltId });
+    }
+});
+
+// ─── billing and collections reads ───────────────────────────────────────────
+
+test('get_invoice maps onto GET /invoices/{id}, which now carries the payments, and refuses a bad id before any HTTP call', async () => {
+    const invoice = { id: 7, currency: 'USD', payments: [{ id: 1, amount_cents: 500, currency: 'USD', method: 'transfer', origin: 'transfer', received_at: '2026-08-20T00:00:00Z' }] };
+    const { result, calls } = await run('get_invoice', { invoice_id: '7' }, { 'GET /invoices/7': jsonResponse({ success: true, data: invoice }) });
+
+    assert.deepEqual(sig(calls), ['GET /invoices/7']);
+    assert.equal(calls[0].query.size, 0);
+    assert.deepEqual(result.data.payments, [{ ...invoice.payments[0], received_at: '2026-08-19T21:00:00-03:00' }], 'the payments pass through, with the time shown in the platform zone like every other timestamp');
+    assert.deepEqual(toolSchema('get_invoice').inputSchema.required, ['invoice_id']);
+
+    for (const invoiceId of [undefined, 0, -3, 1.5, 'x']) {
+        await assertRefused('get_invoice', { invoice_id: invoiceId });
+    }
+});
+
+test('get_account_statement reads the resolved subscriber\'s ledger and passes only the page window', async () => {
+    const routes = { 'GET /subscribers/42/account-statement': jsonResponse({ success: true, data: { entries: [] }, meta: { total: 0 } }) };
+
+    const byId = await run('get_account_statement', { subscriber_id: 42, page: 2, per_page: 50 }, routes);
+
+    assert.deepEqual(sig(byId.calls), ['GET /subscribers/42/account-statement']);
+    assert.deepEqual(Object.fromEntries(byId.calls[0].query), { page: '2', per_page: '50' });
+
+    const byQuery = await run('get_account_statement', { subscriber_query: 'Perez' }, { 'GET /subscribers': ONE_SUBSCRIBER, ...routes });
+
+    assert.deepEqual(sig(byQuery.calls), ['GET /subscribers', 'GET /subscribers/42/account-statement']);
+    assert.equal(byQuery.calls[1].query.size, 0);
+
+    await assertRefused('get_account_statement', {});
+    await assertRefused('get_account_statement', { subscriber_id: 42, subscriber_query: 'Perez' });
+    await assertRefused('get_account_statement', { subscriber_id: 42, per_page: 0 });
+});
+
+test('list_debtors maps onto GET /collections/debtors with currency, query and page, and refuses what the API would ignore or refuse', async () => {
+    const routes = { 'GET /collections/debtors': jsonResponse({ success: true, data: [], meta: { total: 0, total_debt_by_currency: [] } }) };
+
+    const bare = await run('list_debtors', {}, routes);
+
+    assert.deepEqual(sig(bare.calls), ['GET /collections/debtors']);
+    assert.equal(bare.calls[0].query.size, 0);
+
+    const filtered = await run('list_debtors', { currency: 'USD', query: ' Ana ', page: 2, per_page: 50 }, routes);
+
+    assert.deepEqual(Object.fromEntries(filtered.calls[0].query), { currency: 'USD', q: 'Ana', page: '2', per_page: '50' });
+    assert.deepEqual(toolSchema('list_debtors').inputSchema.properties.currency.enum, ['ARS', 'USD']);
+
+    await assertRefused('list_debtors', { currency: 'EUR' });
+    await assertRefused('list_debtors', { currency: 'ars' });
+    await assertRefused('list_debtors', { query: 'A' });
+    await assertRefused('list_debtors', { page: 0 });
+});
+
+test('list_cutoffs asks the collections list, or one subscriber\'s, with status and history, and refuses unknown values before any HTTP call', async () => {
+    const ok = jsonResponse({ success: true, data: [], meta: { total: 0 } });
+    const routes = { 'GET /collections/cutoffs': ok, 'GET /subscribers/42/cutoffs': ok, 'GET /subscribers': ONE_SUBSCRIBER };
+
+    const all = await run('list_cutoffs', { status: 'cut_off', history: true, page: 3, per_page: 10 }, routes);
+
+    assert.deepEqual(sig(all.calls), ['GET /collections/cutoffs']);
+    assert.deepEqual(Object.fromEntries(all.calls[0].query), { status: 'cut_off', history: '1', page: '3', per_page: '10' });
+
+    const plain = await run('list_cutoffs', { history: false }, routes);
+
+    assert.equal(plain.calls[0].query.size, 0, 'history=false adds nothing');
+
+    const one = await run('list_cutoffs', { subscriber_id: 42, status: 'active', history: '1' }, routes);
+
+    assert.deepEqual(sig(one.calls), ['GET /subscribers/42/cutoffs']);
+    assert.deepEqual(Object.fromEntries(one.calls[0].query), { status: 'active', history: '1' });
+
+    const byQuery = await run('list_cutoffs', { subscriber_query: 'Perez' }, routes);
+
+    assert.deepEqual(sig(byQuery.calls), ['GET /subscribers', 'GET /subscribers/42/cutoffs']);
+    assert.deepEqual(toolSchema('list_cutoffs').inputSchema.properties.status.enum, ['cut_off', 'active']);
+
+    await assertRefused('list_cutoffs', { status: 'cortado' });
+    await assertRefused('list_cutoffs', { history: 'maybe' });
+    await assertRefused('list_cutoffs', { subscriber_id: 42, subscriber_query: 'Perez' });
+});
+
+test('the billing tools are read tools, and the amounts they return are not stripped', async () => {
+    for (const name of ['get_invoice', 'get_account_statement', 'list_debtors', 'list_cutoffs']) {
+        assert.equal(toolSchema(name).annotations.readOnlyHint, true, name);
+        assert.equal(toolSchema(name).write, undefined, name);
+    }
+
+    for (const key of ['debt_cents', 'balance_cents', 'amount_cents', 'subscriber_name', 'debt_by_currency']) {
+        assert.equal(REDACTED_KEYS.has(key), false, key);
     }
 });

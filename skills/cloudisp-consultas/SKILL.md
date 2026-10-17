@@ -1,6 +1,6 @@
 ---
 name: cloudisp-consultas
-description: "Consultas de solo lectura en CloudISP con el servidor MCP cloudisp: buscar o consultar abonados, perfiles, planes, facturas, órdenes de trabajo, técnicos, ONUs, OLTs, routers y reportes. Usala cuando pidan buscar/consultar un abonado, ver planes o facturas, listar órdenes, estado de OLTs o routers, o correr un reporte (find subscriber, list plans, work orders, ONUs offline, report)."
+description: "Consultas de solo lectura en CloudISP con el servidor MCP cloudisp: buscar o consultar abonados, perfiles, planes, facturas y sus pagos, cuenta corriente, deudores, cortes por cobranza, órdenes de trabajo, técnicos, ONUs, OLTs, routers y reportes. Usala cuando pidan buscar/consultar un abonado, ver planes, facturas o pagos, ver la cuenta corriente o quién debe, ver los cortes por mora, listar órdenes, estado de OLTs o routers, o correr un reporte (find subscriber, list plans, work orders, ONUs offline, report)."
 license: MIT
 compatibility: Requiere el servidor MCP cloudisp (https://github.com/CloudISP/cloudisp-mcp).
 ---
@@ -30,7 +30,27 @@ herramientas no modifican nada: no hace falta confirmación.
   `upload_max_limit` tal como vienen (Mbps). "Cuántos perfiles" = contá `data`.
 - `list_plans` (`status` opcional): planes comerciales con su `id`.
 - `list_invoices` (`subscriber_id`/`subscriber_query`, `status`: `draft`, `issued`
-  o `void`): el pago no cambia el `status`; la deuda es `balance_cents`.
+  o `void`): el pago no cambia el `status`; la deuda es `balance_cents`. Cada factura
+  trae `subscriber_name`.
+- `get_invoice` (`invoice_id`, de `list_invoices`): cabecera, `lines[]` y `payments[]`
+  (importe, `currency`, `method`, `origin`: `mercadopago`, `transfer` o `manual`, y fecha).
+  No trae la referencia del pago ni datos del medio de pago: no los pidas ni los inventes.
+
+## Cuenta corriente, deudores y cortes — `get_account_statement`, `list_debtors`, `list_cutoffs`
+
+- Los importes vienen en **centavos** y **nunca se suman monedas distintas**: decí
+  «ARS 600,00 y USD 200,00», no un total. Un dato que falta es «no disponible», no 0.
+- `get_account_statement` (abonado): `debt_by_currency` es lo que debe hoy (citá eso).
+  `entries` va de la más nueva a la más vieja y el `balance_cents` de cada línea es el
+  saldo corrido de **su** moneda. Pagina con `page`/`per_page`.
+- `list_debtors` (`currency`: `ARS` o `USD`, `query`: 2+ caracteres del nombre): una fila por
+  abonado **y moneda**, por moneda y de mayor a menor deuda; un abonado puede aparecer dos
+  veces. `meta.total_debt_by_currency` suma **todas** las páginas por moneda. "Quién debe más"
+  es la primera fila de la moneda que pidieron; sin moneda, mostrá cada una por separado.
+- `list_cutoffs` (`status`: `cut_off` = cortado hoy, `active` = ya reconectado; abonado
+  opcional; `history` suma los eventos de corte y reconexión). `debt_cents_at_cutoff` viene con
+  `debt_currency`; si ambos son `null` (`currency_ambiguous`) decí «no disponible» y no inventes la moneda.
+- Estas respuestas traen el nombre del abonado y nada más: ni documento, teléfono ni email.
 
 ## Órdenes de trabajo — `find_work_orders`, `get_work_order`
 

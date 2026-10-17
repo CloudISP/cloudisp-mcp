@@ -8,6 +8,10 @@ Escribime en lenguaje natural; para un abonado usá su número, por ejemplo #123
 • **Diagnosticar a un abonado** — ejemplo: «El abonado #1234 no tiene internet, diagnosticalo»
 • **Ver los planes disponibles** — ejemplo: «¿Qué planes tenemos?»
 • **Ver las facturas de un abonado** — ejemplo: «¿Tiene facturas vencidas el #1234?»
+• **Ver una factura y sus pagos** — ejemplo: «¿Qué pagos tiene la factura 918?»
+• **Ver la cuenta corriente de un abonado** — ejemplo: «Mostrame la cuenta corriente del #1234»
+• **Listar los deudores** — ejemplo: «¿Quiénes son los que más deben?»
+• **Ver los cortes por cobranza** — ejemplo: «¿Qué abonados tienen el servicio cortado por deuda?»
 • **Cambiar el plan de un abonado** ✍️ — ejemplo: «Pasá al #1234 a otro plan»
 • **Cambiar el perfil de velocidad** ✍️ — ejemplo: «Cambiale la velocidad al #1234»
 • **Cortar el servicio de un abonado** ✍️ — ejemplo: «Desconectá al abonado #1234»
