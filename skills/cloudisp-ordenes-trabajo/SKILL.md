@@ -1,6 +1,6 @@
 ---
 name: cloudisp-ordenes-trabajo
-description: "Crear y asignar órdenes de trabajo (instalación, visita técnica, servicio técnico) en CloudISP con el servidor MCP cloudisp, y consultar las existentes. Usala para pedidos de cargar una instalación, abrir una visita técnica, asignar una orden a un técnico, ver OTs pendientes o create/assign work order."
+description: "Crear y asignar órdenes de trabajo (instalación, visita técnica, servicio técnico) en CloudISP con el servidor MCP cloudisp, cambiar su estado y consultar las existentes. Usala para pedidos de cargar una instalación, abrir una visita técnica, asignar una orden a un técnico, cancelar o cerrar una OT, ver OTs pendientes o create/assign work order."
 license: MIT
 compatibility: Requiere el servidor MCP cloudisp (https://github.com/CloudISP/cloudisp-mcp).
 ---
@@ -14,10 +14,16 @@ escritura lleva resumen, confirmación con botones e
 ## Consultar (solo lectura)
 
 - `find_work_orders` con `subscriber_id` o `subscriber_query` y, opcional,
-  `type` y `status` (`pending`, `in_progress`, `completed`, `cancelled`). Si el
-  `subscriber_query` coincide con varios abonados, devuelve los candidatos y no
-  lista: preguntá cuál.
-- `get_work_order` con `work_order_id` para el detalle.
+  `type`, `status` (`pending`, `in_progress`, `completed`, `cancelled`),
+  `priority` (`low`, `medium`, `high`), `assigned_to` (id de un técnico de
+  `find_technician`), `scheduled_from` / `scheduled_to` (`YYYY-MM-DD`) y
+  `overdue: true` (la cita pasó y la OT sigue abierta: las "vencidas" del
+  admin). Si el `subscriber_query` coincide con varios abonados, devuelve los
+  candidatos y no lista: preguntá cuál.
+- `get_work_order` con `work_order_id` para el detalle: trae `created_by` (el
+  vendedor de la venta) y el timeline — `history` y `comments`, los 50 más
+  recientes de cada uno, más nuevos primero. Leé los comentarios antes de
+  cambiar una OT: suelen explicar por qué está como está.
 - Informá `id`, tipo, estado y técnico asignado si viene.
 
 ## Crear — `create_work_order`
@@ -81,6 +87,29 @@ nueva y se hace en dos pasos, cada uno con su confirmación:
 "Cargá una instalación y asignala a Olivera" son **dos acciones**: confirmá y
 ejecutá `create_work_order`; después confirmá y ejecutá `assign_work_order` con
 el `work_order_id` recién creado.
+
+## Cambiar el estado — `update_work_order_status`
+
+1. Mirá la OT con `get_work_order` y decí en qué estado está.
+2. `status`: `in_progress` (iniciar una OT pendiente), `completed` (cerrar una
+   OT que **no** es instalación) o `cancelled` (cancelar). Para cancelar,
+   `reason` es obligatorio y de hasta 500 caracteres: el motivo queda en la OT
+   y lo ve el admin, así que pedilo tal cual lo dijo el operador.
+3. **Confirmá** (OT + abonado, estado actual → estado nuevo y, si cancela, el
+   motivo textual) con los botones `✅ Confirmar` / `❌ Cancelar`.
+4. Llamá `update_work_order_status` con `work_order_id`, `status`, `reason` e
+   `idempotency_key` (`agent-<yyyymmddhhmmss>-ot-estado-<work_order_id>`).
+5. Informá el estado nuevo. `replayed: true` → **"ya estaba en ese estado"**.
+
+**Una instalación no se completa así.** Una OT de instalación (`installation`,
+`catv_installation`, `eoc_installation`) se cierra con el formulario de cierre
+(precinto y firma) desde el admin: el intento devuelve `validation_failed` y no
+cambia nada. Si piden cerrarla, decí que se cierra desde la app de instalación,
+no insistas con la herramienta.
+
+`illegal_transition` (completar una OT pendiente, saltar estados o reabrir una
+cerrada): informalo y frená; la tabla de transiciones la decide el servidor, y
+reabrir o corregir una OT cerrada es una acción de manager en el admin.
 
 Si la orden no está pendiente o no hay orden de ese tipo para el abonado,
 decilo; no inventes un id. `platform_policy_denied`, `actor_forbidden` o
