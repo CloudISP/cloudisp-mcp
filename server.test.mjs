@@ -289,6 +289,27 @@ test('get_subscriber and diagnose_subscriber GET the subscriber, resolving a que
     assert.equal(both.calls.length, 0);
 });
 
+test('the subscriber tools document the fields the admin surface serves', async () => {
+    const tools = new Map(listTools(WRITES_ON).map((tool) => [tool.name, tool]));
+
+    const find = tools.get('find_subscriber');
+    for (const key of ['PPPoE', 'MAC', 'phone', 'address', 'legacy']) {
+        assert.match(find.description, new RegExp(key, 'i'), key);
+        assert.match(find.inputSchema.properties.query.description, new RegExp(key, 'i'), key);
+    }
+    assert.match(find.description, /profile_name/, 'the flat profile/node/OLT names the payload now carries');
+
+    const diagnosis = tools.get('diagnose_subscriber').description;
+    for (const key of ['service', 'problems', 'debt_by_currency', 'overdue_cents', 'oldest_due_date', 'last_payment', 'profile_name']) {
+        assert.match(diagnosis, new RegExp(key), key);
+    }
+
+    // The searchable fields travel on the same query parameter, unchanged.
+    const { calls } = await run('find_subscriber', { query: 'AA:BB:CC:DD:EE:FF' }, { 'GET /subscribers': ONE_SUBSCRIBER });
+    assert.deepEqual(sig(calls), ['GET /subscribers']);
+    assert.equal(calls[0].query.get('q'), 'AA:BB:CC:DD:EE:FF');
+});
+
 test('onu_read posts the operation, polls the task and returns the final projection', async () => {
     const { result, calls } = await run(
         'onu_read',

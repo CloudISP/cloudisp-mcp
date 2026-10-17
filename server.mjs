@@ -2310,11 +2310,13 @@ const TOOLS = [
     readTool(
         'find_subscriber',
         'Buscar abonado',
-        'Find subscribers by subscriber number written as #1234 (exact id), by name or document fragment (query), or by the exact filters document '
+        'Find subscribers by subscriber number written as #1234 (exact id), or by text (query): the name, surname, document, PPPoE user, MAC, phone, address, city, '
+        + 'e-mail and legacy external id are all searchable, accents and case fold (a dotted DNI works), and every word of the term must match. Also by the exact filters document '
         + '(digits only), external_client_id (digits only) and status; filters combine with AND, and at least one of query, document, external_client_id or status is required. '
+        + 'The response carries the flat profile_name, node_name and olt_name beside their ids. '
         + 'Read the meta.total field: a write tool that needs a single subscriber refuses to act when it is not 1.',
         {
-            query: { type: 'string', description: 'Subscriber number as #1234 (alone: not combinable with the filters), name (first/last) or document fragment.' },
+            query: { type: 'string', description: 'Subscriber number as #1234 (alone: not combinable with the filters), or a text fragment: name, surname, document, PPPoE user, MAC, phone, address, city, e-mail or legacy client id.' },
             document: { type: 'string', description: 'Exact document, digits only (no dots, dashes or spaces).' },
             external_client_id: { type: 'string', description: 'Exact external client id, digits only.' },
             status: { type: 'boolean', description: 'The subscriber record\'s boolean status flag (true or false; 1 and 0 also work); not the lifecycle status.' },
@@ -2331,8 +2333,11 @@ const TOOLS = [
     readTool(
         'diagnose_subscriber',
         'Diagnosticar abonado',
-        'One-call diagnosis of a subscriber (kept small): subscriber, billing (open_cutoff, overdue_invoices, outstanding_cents), onu (state and last '
-        + 'optical reading with the last 12 samples and their min/avg/max), network_context (PPPoE session, last 24 h; PON and uplink traffic come as summarised series '
+        'One-call diagnosis of a subscriber (kept small): subscriber (without phone, e-mail or document, with the flat profile_name, node_name and olt_name), '
+        + 'service (the active contract: plan name, code, service, download_kbps, upload_kbps, price_cents with currency and since; {found: false} without one), '
+        + 'billing (open_cutoff, overdue_invoices, debt_by_currency [{currency, debt_cents, overdue_cents}] -- one row per currency, ARS and USD are never added together --, oldest_due_date and '
+        + 'last_payment {amount_cents, currency, method, origin, received_at}, null while the subscriber never paid), problems (the open or acknowledged alerts that name the subscriber, its ONU, its PON port or its OLT, like the admin '
+        + '\'active problems\' card), onu (state and last optical reading with the last 12 samples and their min/avg/max), network_context (PPPoE session, last 24 h; PON and uplink traffic come as summarised series '
         + '{state, series: [{name, unit, last, min, avg, max, last_at, points}]}), consumption (at most 5 recent entries; use subscriber_usage for bytes), activity and open work orders. '
         + 'A section that cannot be built is null and listed in section_errors; null means "no disponible", never 0.',
         SUBSCRIBER_PROPERTIES,

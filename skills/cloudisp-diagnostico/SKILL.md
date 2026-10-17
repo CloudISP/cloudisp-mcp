@@ -12,9 +12,9 @@ diagnóstico es **solo lectura**: no pide confirmación. Las escrituras que
 resultan del diagnóstico (reiniciar, sincronizar, OT, reconectar) se **ofrecen**
 con botones y se hacen solo con confirmación.
 
-Cruzá en este orden: estado y deuda → sesión PPPoE → ONU (estado, RX) →
-TR-069/WiFi → OLT/PON (vecinos caídos = falla de red) → router → logs → OTs
-abiertas.
+Cruzá en este orden: estado, deuda y problemas activos → sesión PPPoE → ONU
+(estado, RX) → TR-069/WiFi → OLT/PON (vecinos caídos = falla de red) → router →
+logs → OTs abiertas.
 
 ## Árbol de decisión
 
@@ -24,7 +24,18 @@ abiertas.
    lectura).
 2. **`diagnose_subscriber`.**
    - `billing.open_cutoff` verdadero → veredicto **"corte por deuda"**. Ofrecé la
-     reconexión **solo si la piden**.
+     reconexión **solo si la piden**. Mencioná la deuda con su moneda
+     (`billing.debt_by_currency` trae una fila por moneda con `debt_cents` y
+     `overdue_cents`: **nunca sumes ARS con USD**), el `oldest_due_date` y el
+     `last_payment` (monto, moneda, método y origen; `null` si nunca pagó). Para
+     el detalle de movimientos usá `get_account_statement`.
+   - `problems` son los **problemas activos** del abonado (alertas abiertas o
+     reconocidas sobre él, su ONU, su puerto PON o su OLT): es la primera tarjeta
+     del Resumen. Si `state` no es `ok`, decí "no disponible"; una alerta que
+     nombra la OLT o el PON ya orienta a falla de red.
+   - `service` es el plan contratado (nombre, velocidades, `price_cents` con
+     moneda y `since`); `found: false` significa que no hay contrato activo, no un
+     plan vacío. `subscriber` trae los nombres de perfil, nodo y OLT.
    - `lifecycle_status` distinto de `active` → informalo.
    - Una sección en `null` (ver `section_errors`) = "no disponible".
 3. **¿Hay sesión PPPoE activa?** (`network_context` / `consumption`).
@@ -40,7 +51,8 @@ abiertas.
 4. **Sin sesión → mirá la ONU.**
    - `state` `offline` → `list_onus` del mismo PON (`olt_id`, `pon_slot`,
      `pon_port`).
-     - **Varios vecinos caídos** → falla de PON/OLT. Hacé `olt_read` con
+     - **Varios vecinos caídos** → falla de PON/OLT. Mirá primero `problems`
+       (la alerta de PON u OLT que lo afecta), después `olt_read` con
        `olt.health_check` y `network_alerts`, y **escalá sin tocar al abonado**.
      - **Cae solo ella** → ofrecé una OT de visita técnica.
    - Online con **RX menor a −27 dBm** → problema óptico: ofrecé OT de visita.
