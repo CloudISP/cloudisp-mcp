@@ -136,26 +136,26 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | --- | --- | --- | --- |
 | `cloudisp_context` | `GET /agent/context` | `knowledge:read` | lectura |
 | `search_knowledge` | `GET /agent/knowledge?q=` · `/agent/knowledge/{id}` | `knowledge:read` | lectura |
-| `find_subscriber` | `GET /subscribers?q=` | `subscribers:read` | lectura |
+| `find_subscriber` | `GET /subscribers?q=` (más `status`, `document`, `external_client_id`) · `GET /subscribers/{id}` para `#N` | `subscribers:read` | lectura |
 | `get_subscriber` | `GET /subscribers/{id}` | `subscribers:read` | lectura |
 | `diagnose_subscriber` | `GET /subscribers/{id}/diagnosis` | `subscribers:read` | lectura |
 | `onu_read` | `POST /subscribers/{id}/onu/reads` + `GET /tasks/{id}` (incluye `onu.wifi_password_check`) | `devices:read` | lectura |
 | `onu_diagnose` | `POST /subscribers/{id}/onu/diagnose` + `GET /tasks/{id}` | `devices:read` | lectura |
 | `get_task` | `GET /tasks/{id}` (`wait_seconds` espera a que termine) | `devices:read` | lectura |
-| `list_onus` | `GET /network/onus` (modelo, firmware, plataforma, solo offline) | `network:read` | lectura |
+| `list_onus` | `GET /network/onus` (estado, modelo, firmware, plataforma, solo offline) | `network:read` | lectura |
 | `list_olts` · `get_olt` | `GET /network/olts` · `/network/olts/{id}` | `network:read` | lectura |
 | `olt_read` | `POST /network/olts/{id}/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
 | `list_routers` | `GET /network/routers` | `network:read` | lectura |
 | `router_read` | `POST /network/routers/{id}/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
 | `network_alerts` | `GET /network/alerts` | `network:read` | lectura |
-| `device_metrics` | `GET /network/devices/{kind}/{id}/metrics/catalog` · `/series` | `network:read` | lectura |
+| `device_metrics` | `GET /network/devices/{kind}/{id}/metrics/catalog` (con `search`, `family_id`, `template_id`, `state`, `selected`, `cursor`, `limit`) · `/series` | `network:read` | lectura |
 | `platform_logs` | `GET /logs/events` | `network:read` | lectura |
 | `list_reports` · `run_report` | `GET /reports` · `/reports/{key}` | `reports:read` | lectura |
-| `export_report` | `GET /reports/{key}?format=pdf\|csv` (guarda el archivo y devuelve su línea `MEDIA:`) | `reports:read` | lectura |
+| `export_report` | `GET /reports/{key}?format=pdf\|csv` (`from`/`to` viajan como `filter_period`, más `filters` libres; guarda el archivo y devuelve su línea `MEDIA:`) | `reports:read` | lectura |
 | `build_report` | sin pedido a la API: arma un HTML autocontenido con KPIs, tablas y gráficos SVG | — | lectura |
-| `list_internet_profiles` | `GET /internet-profiles` | `profiles:read` | lectura |
+| `list_internet_profiles` | `GET /internet-profiles` (`status`, por defecto `active`) | `profiles:read` | lectura |
 | `list_plans` | `GET /plans` | `plans:read` | lectura |
-| `list_invoices` | `GET /invoices` | `invoices:read` | lectura |
+| `list_invoices` | `GET /invoices` (`status`: `draft`, `issued`, `void`) | `invoices:read` | lectura |
 | `find_work_orders` · `get_work_order` | `GET /work-orders` · `/work-orders/{id}` | `work-orders:read` | lectura |
 | `find_technician` | `GET /employees?q=` | `employees:read` | lectura |
 | `network_snapshot` | `GET /operations/snapshot` (`platform_id` opcional) | `operations:read` | lectura |
@@ -184,7 +184,7 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `restore_wifi` | `POST /subscribers/{id}/onu/actions` (`onu.wifi_restore`) | `devices:operate` | escritura |
 | `reprovision_onu` | `POST /subscribers/{id}/onu/provision` | `devices:operate` | escritura |
 | `kick_pppoe` | `POST /subscribers/{id}/pppoe/kick` | `devices:operate` | escritura, destructiva |
-| `locate_new_onu` | `POST /subscribers/{id}/onu/swap/locate` + `GET /tasks/{id}` | `devices:operate` | escritura |
+| `locate_new_onu` | `POST /subscribers/{id}/onu/swap/locate` (`olt_id` opcional) + `GET /tasks/{id}` | `devices:operate` | escritura |
 | `swap_onu` | `POST /subscribers/{id}/onu/swap` | `devices:operate` | escritura |
 
 Todas las herramientas que reciben un abonado aceptan `subscriber_id` o
@@ -247,6 +247,35 @@ convierte a `America/Argentina/Salta` con `-03:00`
 (`command`: `/system/identity/print`, `/system/resource/print`, `/interface/print`
 o `/ip/address/print`) y `routeros.interface_monitor_traffic`.
 
+`olt_read` solo ejecuta `olt.health_check`, `olt.system_info_read`,
+`olt.mac_table_read` y `olt.poll` (la API rechaza `olt.unprovisioned_onus_read`).
+
+Estas herramientas validan antes de llamar a la API y, si el valor no sirve,
+responden `validation_failed` sin hacer ningún pedido:
+
+- `device_metrics`: `window` (`15m`, `1h`, `6h`, `24h`, `7d`, `30d`), `resolution`
+  (`auto`, `raw`, `trend_1h`) y de 1 a 8 `metric_ids` de 64 caracteres
+  hexadecimales en minúscula. Los ids son opacos y salen del catálogo (la
+  llamada sin `metric_ids`, que también acepta `search`, `family_id`,
+  `template_id`, `state`, `selected`, `cursor` y `limit` de 1 a 500); un nombre
+  como `cpu` no es un id.
+- `list_onus` (`state`: `online`, `offline`, `unknown`, `absent`) y
+  `list_invoices` (`status`: `draft`, `issued`, `void`).
+- `find_subscriber`: hace falta al menos uno de `query`, `document` (solo
+  dígitos), `external_client_id` (solo dígitos) o `status` (`true`/`false`);
+  se combinan con AND. `#N` es una búsqueda exacta y no se combina con los filtros.
+- `list_internet_profiles` lista `active` salvo que se pida `deprecated` o
+  `soft_deleted`.
+- `export_report`: `from` y `to` van juntos (`YYYY-MM-DD`) y viajan como
+  `filter_period=<from>,<to>`; el resto de los filtros del reporte van en `filters`,
+  igual que en `run_report`.
+- `locate_new_onu`: `olt_id` (opcional) acota la búsqueda a una sola OLT.
+
+Con `open_work_order`, `disconnect_subscriber` usa la `idempotency_key` como
+`external_ref` de la orden. La API acepta 100 caracteres como máximo: una clave
+más larga se reemplaza por `idem-<sha256 de la clave>`, que es siempre el mismo
+para la misma clave (el reintento sigue siendo idempotente).
+
 Las escrituras mandan `Idempotency-Key` (reintentar con la misma clave no repite
 la acción).
 
@@ -276,7 +305,7 @@ de la herramienta.
 
 ### Archivos: informes y gráficos
 
-`export_report` (`key`, `format` `pdf`|`csv`, `from`, `to`, `platform_id`) y
+`export_report` (`key`, `format` `pdf`|`csv`, `from` + `to`, `platform_id`, `filters`) y
 `build_report` guardan el archivo en `CLOUDISP_ARTIFACT_DIR` y responden
 `{"ok": true, "path": "...", "media": "MEDIA:<path>", "bytes": N}`; el agente lo
 manda al chat incluyendo la línea `media` tal cual en su respuesta (Hermes la

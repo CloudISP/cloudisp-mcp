@@ -12,6 +12,7 @@
  * `initialize`, `tools/list` and `tools/call` (plus `ping`) are implemented.
  */
 
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 import { fileStamp, saveArtifact } from './lib/artifacts.mjs';
@@ -19,7 +20,7 @@ import { GUIDE } from './lib/guide.mjs';
 import { normalizeReport, renderReportHtml, ReportInputError, slugify } from './lib/report-html.mjs';
 
 const SERVER_NAME = 'cloudisp-mcp';
-const SERVER_VERSION = '0.5.0';
+const SERVER_VERSION = '0.5.2';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const API_PREFIX = '/api/v1/public';
 const REQUEST_TIMEOUT_MS = 30000;
@@ -415,6 +416,49 @@ function optInt(args, key, min = 1) {
 }
 
 /**
+ * Read an optional boolean-like argument: `true`, `false`, `1` or `0` (what the API takes as a flag).
+ *
+ * @param {object} args Tool arguments.
+ * @param {string} key Argument name.
+ * @return {boolean|undefined} The flag, or undefined when absent.
+ */
+function optFlag(args, key) {
+    if (!isPresent(args[key])) {
+        return undefined;
+    }
+
+    const text = String(args[key]).toLowerCase();
+
+    if (!['true', '1', 'false', '0'].includes(text)) {
+        fail(invalid(`${key} must be true, false, 1 or 0.`));
+    }
+
+    return text === 'true' || text === '1';
+}
+
+/**
+ * Read an optional digits-only argument (a document, an external id) as the string the API matches exactly.
+ *
+ * @param {object} args Tool arguments.
+ * @param {string} key Argument name.
+ * @param {number} maxLength Most digits accepted.
+ * @return {string|undefined} The digits, or undefined when absent.
+ */
+function optDigits(args, key, maxLength) {
+    if (!isPresent(args[key])) {
+        return undefined;
+    }
+
+    const value = typeof args[key] === 'number' && Number.isSafeInteger(args[key]) && args[key] >= 0 ? String(args[key]) : args[key];
+
+    if (typeof value !== 'string' || !new RegExp(`^[0-9]{1,${maxLength}}$`).test(value.trim())) {
+        fail(invalid(`${key} must be digits only (no dots, dashes or spaces), at most ${maxLength}.`));
+    }
+
+    return value.trim();
+}
+
+/**
  * @param {object} args Tool arguments.
  * @return {{ page: number|undefined, per_page: number|undefined }} Optional pagination query.
  */
@@ -561,28 +605,50 @@ async function findPendingWorkOrder(fetchImpl, subscriberId, type) {
 // ─── Tool handlers ───────────────────────────────────────────────────────────
 
 /**
- * `find_subscriber` — `GET /subscribers?q=`.
+ * `find_subscriber` — `GET /subscribers?q=`, with the optional exact filters `status`, `document` and `external_client_id`;
+ * `#1234` looks that subscriber number up on its own.
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
  * @return {Promise<object>} Public API envelope.
  */
 async function findSubscriber(args, fetchImpl) {
-    const query = requireQuery(args.query);
-    const response = await searchSubscribers(fetchImpl, query);
+    const query = asTrimmedString(args.query);
+    const filters = {
+        status: optFlag(args, 'status'),
+        document: optDigits(args, 'document', 32),
+        external_client_id: optDigits(args, 'external_client_id', 19),
+    };
+    const filtered = Object.values(filters).some((value) => value !== undefined);
+
+    if (query === '' && !filtered) {
+        fail(invalid('Provide query, document, external_client_id or status.'));
+    }
+
+    if (filtered && SUBSCRIBER_NUMBER_PATTERN.test(query)) {
+        fail(invalid('A subscriber number (#1234) is an exact lookup: do not combine it with status, document or external_client_id.'));
+    }
+
+    const response = filtered
+        ? await apiRequest(fetchImpl, 'GET', '/subscribers', { query: { q: query, ...filters } })
+        : await searchSubscribers(fetchImpl, query);
 
     return isFailure(response) ? apiFailurePayload(response) : response.body;
 }
 
+/** Statuses `list_internet_profiles` can ask for (`Profiles::LIFECYCLE_STATUSES`); the API lists `active` unless told otherwise. */
+const PROFILE_STATUSES = ['active', 'deprecated', 'soft_deleted'];
+
 /**
- * `list_internet_profiles` — `GET /internet-profiles?status=active&per_page=100` (the API maximum; the default page is 20).
+ * `list_internet_profiles` — `GET /internet-profiles?status=&per_page=100` (the API maximum; the default page is 20); `status` defaults to `active`.
  *
- * @param {object} _args Tool arguments (unused).
+ * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
  * @return {Promise<object>} Public API envelope.
  */
-async function listInternetProfiles(_args, fetchImpl) {
-    const response = await apiRequest(fetchImpl, 'GET', '/internet-profiles', { query: { status: 'active', per_page: 100 } });
+async function listInternetProfiles(args, fetchImpl) {
+    const status = optEnum(args, 'status', PROFILE_STATUSES) ?? 'active';
+    const response = await apiRequest(fetchImpl, 'GET', '/internet-profiles', { query: { status, per_page: 100 } });
 
     return isFailure(response) ? apiFailurePayload(response) : response.body;
 }
@@ -632,6 +698,20 @@ async function changeSubscriberBandwidth(args, fetchImpl) {
     return isFailure(response) ? apiFailurePayload(response) : response.body;
 }
 
+/** Longest `external_ref` the public API accepts on a work order. */
+const WORK_ORDER_REF_MAX_LENGTH = 100;
+
+/**
+ * The work order `external_ref` that stands for an idempotency key: the key itself when it fits, otherwise a digest of it.
+ * The same key always gives the same ref, so a replay stays idempotent, and the ref never passes the API cap.
+ *
+ * @param {string} key Idempotency key (up to 128 characters).
+ * @return {string} A ref of at most {@link WORK_ORDER_REF_MAX_LENGTH} characters.
+ */
+function workOrderRef(key) {
+    return key.length <= WORK_ORDER_REF_MAX_LENGTH ? key : `idem-${createHash('sha256').update(key).digest('hex')}`;
+}
+
 /**
  * `disconnect_subscriber` — resolves the subscriber, then `POST /subscribers/{id}/disconnect`,
  * optionally opening a linked work order keyed by the same idempotency token.
@@ -660,7 +740,7 @@ async function disconnectSubscriber(args, fetchImpl) {
     const type = asTrimmedString(args.work_order_type) || 'technical_service';
     const title = asTrimmedString(args.work_order_title) || `Desconexión de abonado ${subscriberId}`;
     const workOrder = await apiRequest(fetchImpl, 'POST', '/work-orders', {
-        body: { client_id: subscriberId, type, title, external_ref: idempotencyKey },
+        body: { client_id: subscriberId, type, title, external_ref: workOrderRef(idempotencyKey) },
     });
 
     if (isFailure(workOrder)) {
@@ -857,7 +937,7 @@ const ONU_READ_OPERATIONS = [
 
 /** OLT read operations the public API may enable (netwatcher routable ∩ admin allowlist). */
 const OLT_READ_OPERATIONS = [
-    'olt.health_check', 'olt.system_info_read', 'olt.mac_table_read', 'olt.unprovisioned_onus_read', 'olt.poll',
+    'olt.health_check', 'olt.system_info_read', 'olt.mac_table_read', 'olt.poll',
 ];
 
 /** Router read operations netwatcher's RouterOS worker actually executes. */
@@ -1027,6 +1107,9 @@ async function getTask(args, fetchImpl, clock) {
     return awaitTask(fetchImpl, taskRunId, { ...clock, timeoutMs: waitSeconds * 1000 });
 }
 
+/** ONU states `GET /network/onus` filters by (`absent` is a presentation state for ONUs the OLT no longer registers). */
+const ONU_STATES = ['online', 'offline', 'unknown', 'absent'];
+
 /**
  * `list_onus` — `GET /network/onus`.
  *
@@ -1039,7 +1122,7 @@ async function listOnus(args, fetchImpl) {
 
     return call(fetchImpl, 'GET', '/network/onus', {
         query: {
-            state: asTrimmedString(args.state),
+            state: optEnum(args, 'state', ONU_STATES),
             client_id: clientId,
             olt_id: optInt(args, 'olt_id'),
             pon_slot: optInt(args, 'pon_slot', 0),
@@ -1137,8 +1220,43 @@ async function networkAlerts(args, fetchImpl) {
     return call(fetchImpl, 'GET', '/network/alerts', { query: { limit: optInt(args, 'limit') } });
 }
 
+/** Windows the series endpoint accepts (the API default is `24h`). */
+const METRIC_WINDOWS = ['15m', '1h', '6h', '24h', '7d', '30d'];
+
+/** Series resolutions the API accepts (the API default is `auto`). */
+const METRIC_RESOLUTIONS = ['auto', 'raw', 'trend_1h'];
+
+/** Most metric ids one series call takes. */
+const METRIC_IDS_MAX = 8;
+
+/** Metric, family and template ids are opaque: 64 lowercase hex characters, only ever copied from the catalogue. */
+const METRIC_ID_PATTERN = /^[0-9a-f]{64}$/;
+
+/** Most rows one catalogue page returns. */
+const CATALOG_LIMIT_MAX = 500;
+
 /**
- * `device_metrics` — the metric catalogue of a device, or the series of the requested `metric_ids`.
+ * Read an optional catalogue id argument (`family_id`, `template_id`).
+ *
+ * @param {object} args Tool arguments.
+ * @param {string} key Argument name.
+ * @return {string|undefined} The id, or undefined when absent.
+ */
+function optCatalogId(args, key) {
+    if (!isPresent(args[key])) {
+        return undefined;
+    }
+
+    if (typeof args[key] !== 'string' || !METRIC_ID_PATTERN.test(args[key])) {
+        fail(invalid(`${key} must be an id taken from the catalogue: 64 lowercase hex characters.`));
+    }
+
+    return args[key];
+}
+
+/**
+ * `device_metrics` — the metric catalogue of a device (filtered and paged with `search`, `family_id`, `template_id`,
+ * `state`, `selected`, `cursor` and `limit`), or the series of the requested `metric_ids`. Bounds are checked before any request.
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
@@ -1153,14 +1271,37 @@ async function deviceMetrics(args, fetchImpl) {
         fail(invalid('metric_ids must be an array of metric ids.'));
     }
 
-    const metricIds = (args.metric_ids ?? []).map(String);
+    const metricIds = args.metric_ids ?? [];
 
     if (metricIds.length === 0) {
-        return call(fetchImpl, 'GET', `${base}/catalog`);
+        const selected = optFlag(args, 'selected');
+
+        return call(fetchImpl, 'GET', `${base}/catalog`, {
+            query: {
+                search: asTrimmedString(args.search),
+                family_id: optCatalogId(args, 'family_id'),
+                template_id: optCatalogId(args, 'template_id'),
+                state: asTrimmedString(args.state),
+                selected: selected === undefined ? undefined : Number(selected),
+                cursor: asTrimmedString(args.cursor),
+                limit: optLimit(args, CATALOG_LIMIT_MAX),
+            },
+        });
+    }
+
+    if (metricIds.length > METRIC_IDS_MAX || !metricIds.every((id) => typeof id === 'string' && METRIC_ID_PATTERN.test(id))) {
+        fail(invalid(
+            `metric_ids takes 1 to ${METRIC_IDS_MAX} ids of 64 lowercase hex characters, copied from the catalogue `
+            + '(call device_metrics without metric_ids first); names such as cpu or mem are not ids.',
+        ));
     }
 
     return call(fetchImpl, 'GET', `${base}/series`, {
-        query: { metric_id: metricIds, window: asTrimmedString(args.window), resolution: asTrimmedString(args.resolution) },
+        query: {
+            metric_id: metricIds,
+            window: optEnum(args, 'window', METRIC_WINDOWS),
+            resolution: optEnum(args, 'resolution', METRIC_RESOLUTIONS),
+        },
     });
 }
 
@@ -1232,7 +1373,7 @@ async function runReport(args, fetchImpl) {
 const REPORT_FORMATS = { pdf: 'application/pdf', csv: 'text/csv' };
 
 /**
- * `export_report` — `GET /reports/{key}?format=pdf|csv`: save the file and hand back its `MEDIA:` line.
+ * `export_report` — `GET /reports/{key}?format=pdf|csv` (`from`/`to` travel as `filter_period=<from>,<to>`, other `filters` as given): save the file and hand back its `MEDIA:` line.
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
@@ -1252,7 +1393,7 @@ async function exportReport(args, fetchImpl, _clock, env) {
         fail(invalid('format is required: pdf or csv.'));
     }
 
-    const query = { format, platform_id: optInt(args, 'platform_id') };
+    const dates = {};
 
     for (const name of ['from', 'to']) {
         if (isPresent(args[name])) {
@@ -1260,8 +1401,18 @@ async function exportReport(args, fetchImpl, _clock, env) {
                 fail(invalid(`${name} must be a date as YYYY-MM-DD.`));
             }
 
-            query[name] = args[name].trim();
+            dates[name] = args[name].trim();
         }
+    }
+
+    if (Object.keys(dates).length === 1) {
+        fail(invalid('from and to go together: give both dates (YYYY-MM-DD) or neither.'));
+    }
+
+    const query = { ...(isPlainObject(args.filters) ? args.filters : {}), format, platform_id: optInt(args, 'platform_id') };
+
+    if (dates.from !== undefined) {
+        query.filter_period = `${dates.from},${dates.to}`;
     }
 
     const response = await apiRequest(fetchImpl, 'GET', `/reports/${key}`, { query, binary: true });
@@ -1330,6 +1481,9 @@ async function listPlans(args, fetchImpl) {
     });
 }
 
+/** Invoice statuses `GET /invoices` filters by. */
+const INVOICE_STATUSES = ['draft', 'issued', 'void'];
+
 /**
  * `list_invoices` — `GET /invoices`, optionally for one subscriber.
  *
@@ -1341,7 +1495,7 @@ async function listInvoices(args, fetchImpl) {
     const subscriberId = await resolveSubscriberId(fetchImpl, args, { optional: true });
 
     return call(fetchImpl, 'GET', '/invoices', {
-        query: { subscriber_id: subscriberId, status: asTrimmedString(args.status), ...pageQuery(args) },
+        query: { subscriber_id: subscriberId, status: optEnum(args, 'status', INVOICE_STATUSES), ...pageQuery(args) },
     });
 }
 
@@ -1934,8 +2088,10 @@ function swapBody(args) {
 async function locateNewOnu(args, fetchImpl, clock) {
     const idempotencyKey = requireIdempotencyKey(args);
     const mac = requireMac(args);
+    const oltId = optInt(args, 'olt_id');
     const subscriberId = await resolveSubscriberId(fetchImpl, args);
-    const response = await apiRequest(fetchImpl, 'POST', `/subscribers/${subscriberId}/onu/swap/locate`, { body: { mac }, idempotencyKey });
+    const body = oltId === undefined ? { mac } : { mac, olt_id: oltId };
+    const response = await apiRequest(fetchImpl, 'POST', `/subscribers/${subscriberId}/onu/swap/locate`, { body, idempotencyKey });
 
     if (isFailure(response)) {
         return apiFailurePayload(response);
@@ -2088,11 +2244,16 @@ const TOOLS = [
     readTool(
         'find_subscriber',
         'Buscar abonado',
-        'Find subscribers by subscriber number written as #1234 (exact id), or by name or document fragment. '
+        'Find subscribers by subscriber number written as #1234 (exact id), by name or document fragment (query), or by the exact filters document '
+        + '(digits only), external_client_id (digits only) and status; filters combine with AND, and at least one of query, document, external_client_id or status is required. '
         + 'Read the meta.total field: a write tool that needs a single subscriber refuses to act when it is not 1.',
-        { query: { type: 'string', description: 'Subscriber number as #1234, name (first/last) or document fragment.' } },
+        {
+            query: { type: 'string', description: 'Subscriber number as #1234 (alone: not combinable with the filters), name (first/last) or document fragment.' },
+            document: { type: 'string', description: 'Exact document, digits only (no dots, dashes or spaces).' },
+            external_client_id: { type: 'string', description: 'Exact external client id, digits only.' },
+            status: { type: 'boolean', description: 'The subscriber record\'s boolean status flag (true or false; 1 and 0 also work); not the lifecycle status.' },
+        },
         findSubscriber,
-        ['query'],
     ),
     readTool(
         'get_subscriber',
@@ -2151,11 +2312,11 @@ const TOOLS = [
     readTool(
         'list_onus',
         'Listar ONUs',
-        'List ONUs of the visible platforms, optionally filtered by state (online, offline, los, absent...), subscriber, OLT, PON, platform, model (product_class) or firmware, '
+        'List ONUs of the visible platforms, optionally filtered by state (online, offline, unknown, absent), subscriber, OLT, PON, platform, model (product_class) or firmware, '
         + 'or only the offline ones. Each row carries olt, pon_slot, pon_port, state, client_id, last_seen_at, offline_since, acs {product_class, firmware, adapter, sync_template, '
         + 'last_inform_at, wifi_channel_24, wifi_channel_5} (null when the ONU has no ACS data) and client {id, name}. meta.total is the full count: use per_page=1 to only count.',
         {
-            state: { type: 'string', description: 'ONU state filter, e.g. online, offline, los.' },
+            state: { type: 'string', enum: ONU_STATES, description: 'ONU state filter (absent: no longer registered on the OLT).' },
             ...SUBSCRIBER_PROPERTIES,
             olt_id: { type: 'integer', description: 'Only ONUs of this OLT.' },
             pon_slot: { type: 'integer', description: 'Only ONUs of this PON slot (combine with olt_id and pon_port).' },
@@ -2188,7 +2349,7 @@ const TOOLS = [
         'olt_read',
         'Leer OLT',
         'Run a read-only operation on an OLT through a device task and wait up to 40 s for the result (see onu_read for the result shape). '
-        + 'Operations: olt.health_check, olt.system_info_read, olt.mac_table_read, olt.unprovisioned_onus_read, olt.poll; the API refuses those it has not enabled.',
+        + 'Operations: olt.health_check, olt.system_info_read, olt.mac_table_read, olt.poll; the API refuses those it has not enabled.',
         {
             olt_id: { type: 'integer', description: 'OLT id from list_olts.' },
             operation: { type: 'string', enum: OLT_READ_OPERATIONS, description: 'OLT read operation.' },
@@ -2229,13 +2390,26 @@ const TOOLS = [
     readTool(
         'device_metrics',
         'Métricas de dispositivo',
-        'Metrics of a router or OLT. Without metric_ids it returns the metric catalogue of the device; with metric_ids it returns their time series.',
+        'Metrics of a router or OLT. Without metric_ids it returns the metric catalogue of the device (narrow and page it with search, family_id, template_id, state, selected, cursor and limit); '
+        + 'with metric_ids it returns their time series. metric_ids are opaque 64-character hex ids that must be taken from the catalogue: call without metric_ids first, never invent names such as cpu or mem.',
         {
             kind: { type: 'string', enum: DEVICE_KINDS, description: 'Device kind.' },
             device_id: { type: 'integer', description: 'Router or OLT id.' },
-            metric_ids: { type: 'array', items: { type: 'string' }, description: 'Metric ids from the catalogue. Omit to get the catalogue.' },
-            window: { type: 'string', description: 'Time window of the series, e.g. 1h, 24h.' },
-            resolution: { type: 'string', description: 'Series resolution.' },
+            metric_ids: {
+                type: 'array',
+                items: { type: 'string' },
+                maxItems: METRIC_IDS_MAX,
+                description: 'Opaque metric ids (64 lowercase hex characters) copied from the catalogue, at most 8. Omit to get the catalogue.',
+            },
+            window: { type: 'string', enum: METRIC_WINDOWS, description: 'Time window of the series. Default 24h.' },
+            resolution: { type: 'string', enum: METRIC_RESOLUTIONS, description: 'Series resolution. Default auto.' },
+            search: { type: 'string', description: 'Catalogue only: text to search in the metrics.' },
+            family_id: { type: 'string', description: 'Catalogue only: family id (64 lowercase hex characters) from a previous catalogue answer.' },
+            template_id: { type: 'string', description: 'Catalogue only: template id (64 lowercase hex characters) from a previous catalogue answer.' },
+            state: { type: 'string', description: 'Catalogue only: metric state filter.' },
+            selected: { type: 'boolean', description: 'Catalogue only: only the selected (true) or not selected (false) metrics.' },
+            cursor: { type: 'string', description: 'Catalogue only: cursor of the next page, from the previous answer.' },
+            limit: { type: 'integer', description: 'Catalogue only: rows per page, 1 to 500 (default 500).' },
         },
         deviceMetrics,
         ['kind', 'device_id'],
@@ -2285,9 +2459,10 @@ const TOOLS = [
         {
             key: { type: 'string', description: 'Report key from list_reports.' },
             format: { type: 'string', enum: ['pdf', 'csv'], description: 'File format.' },
-            from: { type: 'string', description: 'Start date, YYYY-MM-DD (reports that declare a date range).' },
-            to: { type: 'string', description: 'End date, YYYY-MM-DD.' },
+            from: { type: 'string', description: 'Start date, YYYY-MM-DD (reports that declare a date range). Give it together with to.' },
+            to: { type: 'string', description: 'End date, YYYY-MM-DD. Give it together with from.' },
             platform_id: { type: 'integer', description: 'Restrict the report to one visible platform.' },
+            filters: { type: 'object', description: 'The report\'s declared filters as name/value pairs (filter_<name>), as in run_report.' },
         },
         exportReport,
         ['key', 'format'],
@@ -2362,9 +2537,9 @@ const TOOLS = [
     readTool(
         'list_internet_profiles',
         'Listar perfiles de internet',
-        'List the active internet profiles of the credential platform with their id, name, download_max_limit and '
+        'List the internet profiles of the credential platform (active ones unless status says otherwise) with their id, name, download_max_limit and '
         + 'upload_max_limit. Use profile_id from here for change_subscriber_bandwidth.',
-        {},
+        { status: { type: 'string', enum: PROFILE_STATUSES, description: 'Profile status. Default active.' } },
         listInternetProfiles,
     ),
     readTool(
@@ -2381,10 +2556,10 @@ const TOOLS = [
     readTool(
         'list_invoices',
         'Listar facturas',
-        'List invoices, optionally of one subscriber and status. Payment does not change status: remaining debt is balance_cents.',
+        'List invoices, optionally of one subscriber and status (draft, issued or void). Payment does not change status: remaining debt is balance_cents.',
         {
             ...SUBSCRIBER_PROPERTIES,
-            status: { type: 'string', description: 'Invoice status filter.' },
+            status: { type: 'string', enum: INVOICE_STATUSES, description: 'Invoice status filter.' },
             page: { type: 'integer', description: 'Page number, from 1.' },
             per_page: { type: 'integer', description: 'Rows per page (API maximum 100).' },
         },
@@ -2606,8 +2781,8 @@ const TOOLS = [
         'disconnect_subscriber',
         'Desconectar abonado',
         'Disconnect a subscriber (active -> disconnected): the service is cut. Resolves a text query only when it matches exactly one '
-        + 'subscriber. Optionally opens a linked work order using the same idempotency_key as external_ref; the work order is only opened '
-        + 'when the disconnect is accepted.',
+        + 'subscriber. Optionally opens a linked work order using the idempotency_key as external_ref (a key longer than 100 characters is replaced by a '
+        + 'digest of it, the same every time); the work order is only opened when the disconnect is accepted.',
         {
             ...SUBSCRIBER_PROPERTIES,
             scope: { type: 'string', enum: SERVICE_SCOPES, description: 'Service to cut: internet (default), catv or all.' },
@@ -2743,6 +2918,7 @@ const TOOLS = [
         {
             ...SUBSCRIBER_PROPERTIES,
             mac: { type: 'string', description: 'MAC of the new ONU: 12 hexadecimal characters, separators allowed.' },
+            olt_id: { type: 'integer', description: 'Only search this OLT (id from list_olts) instead of every OLT of the subscriber\'s platform.' },
         },
         ['mac'],
         locateNewOnu,

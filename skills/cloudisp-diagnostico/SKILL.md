@@ -38,7 +38,7 @@ abiertas.
      `onu_read` con `onu.wifi_password_check` (`parameters.ssid_index`) dice si
      coincide con la registrada, sin mostrarla.
 4. **Sin sesión → mirá la ONU.**
-   - `state` `offline` o `los` → `list_onus` del mismo PON (`olt_id`, `pon_slot`,
+   - `state` `offline` → `list_onus` del mismo PON (`olt_id`, `pon_slot`,
      `pon_port`).
      - **Varios vecinos caídos** → falla de PON/OLT. Hacé `olt_read` con
        `olt.health_check` y `network_alerts`, y **escalá sin tocar al abonado**.
