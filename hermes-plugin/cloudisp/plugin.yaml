@@ -1,6 +1,6 @@
 name: cloudisp
 kind: standalone
-version: "0.5.3"
+version: "0.6.0"
 requires_hermes: ">=0.22"
 description: "Capa comercial del Asistente CloudISP: comandos permitidos, corte por cupo de uso, /guia, identidad del operador en cada llamada al MCP, aprobación humana de toda escritura, registro de consumo y limpieza de marcas."
 author: CloudISP

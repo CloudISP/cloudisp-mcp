@@ -46,7 +46,7 @@ from .strings import (
 log = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
-VERSION = "0.5.3"  # same as plugin.yaml (a test keeps them equal)
+VERSION = "0.6.0"  # same as plugin.yaml (a test keeps them equal)
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "env_file": "",

@@ -20,7 +20,7 @@ import { GUIDE } from './lib/guide.mjs';
 import { normalizeReport, renderReportHtml, ReportInputError, slugify } from './lib/report-html.mjs';
 
 const SERVER_NAME = 'cloudisp-mcp';
-const SERVER_VERSION = '0.5.3';
+const SERVER_VERSION = '0.6.0';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const API_PREFIX = '/api/v1/public';
 const REQUEST_TIMEOUT_MS = 30000;
