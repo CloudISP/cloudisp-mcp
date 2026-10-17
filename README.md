@@ -136,9 +136,9 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | --- | --- | --- | --- |
 | `cloudisp_context` | `GET /agent/context` | `knowledge:read` | lectura |
 | `search_knowledge` | `GET /agent/knowledge?q=` · `/agent/knowledge/{id}` | `knowledge:read` | lectura |
-| `find_subscriber` | `GET /subscribers?q=` (más `status`, `document`, `external_client_id`) · `GET /subscribers/{id}` para `#N` | `subscribers:read` | lectura |
+| `find_subscriber` | `GET /subscribers?q=` (nombre, documento, PPPoE, MAC, teléfono, dirección o id legado; más `status`, `document`, `external_client_id`) · `GET /subscribers/{id}` para `#N` | `subscribers:read` | lectura |
 | `get_subscriber` | `GET /subscribers/{id}` | `subscribers:read` | lectura |
-| `diagnose_subscriber` | `GET /subscribers/{id}/diagnosis` | `subscribers:read` | lectura |
+| `diagnose_subscriber` | `GET /subscribers/{id}/diagnosis` (deuda por moneda, problemas activos, plan contratado) | `subscribers:read` | lectura |
 | `onu_read` | `POST /subscribers/{id}/onu/reads` + `GET /tasks/{id}` (incluye `onu.wifi_password_check`) | `devices:read` | lectura |
 | `onu_diagnose` | `POST /subscribers/{id}/onu/diagnose` + `GET /tasks/{id}` | `devices:read` | lectura |
 | `get_task` | `GET /tasks/{id}` (`wait_seconds` espera a que termine) | `devices:read` | lectura |
@@ -271,6 +271,10 @@ responden `validation_failed` sin hacer ningún pedido:
 - `find_subscriber`: hace falta al menos uno de `query`, `document` (solo
   dígitos), `external_client_id` (solo dígitos) o `status` (`true`/`false`);
   se combinan con AND. `#N` es una búsqueda exacta y no se combina con los filtros.
+  `query` busca en nombre, apellido, documento, usuario PPPoE, MAC, teléfono,
+  dirección, localidad, email e id legado, sin acentos ni mayúsculas, y cada
+  palabra debe coincidir; el resultado trae el nombre del perfil, del nodo y de la
+  OLT, más el plan contratado en `get_subscriber` (`service`).
 - `list_internet_profiles` lista `active` salvo que se pida `deprecated` o
   `soft_deleted`.
 - `export_report`: `from` y `to` van juntos (`YYYY-MM-DD`) y viajan como
