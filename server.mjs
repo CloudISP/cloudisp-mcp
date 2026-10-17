@@ -1499,6 +1499,72 @@ async function listInvoices(args, fetchImpl) {
     });
 }
 
+/**
+ * `get_invoice` — `GET /invoices/{id}`: the header, `subscriber_name`, `lines[]` and the allocated `payments[]`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function getInvoice(args, fetchImpl) {
+    return call(fetchImpl, 'GET', `/invoices/${requireId(args, 'invoice_id')}`);
+}
+
+/**
+ * `get_account_statement` — `GET /subscribers/{id}/account-statement`: the ledger (newest first, paged) and the debt per currency.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function getAccountStatement(args, fetchImpl) {
+    const query = pageQuery(args);
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'GET', `/subscribers/${subscriberId}/account-statement`, { query });
+}
+
+/** Currencies an invoice, and so a debt, can be in (`ck_billing_invoices_currency`). */
+const DEBT_CURRENCIES = ['ARS', 'USD'];
+
+/**
+ * `list_debtors` — `GET /collections/debtors`: one row per subscriber and currency, never a sum across currencies.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function listDebtors(args, fetchImpl) {
+    const name = asTrimmedString(args.query);
+
+    // The API ignores a one-character search; refuse it so the agent does not believe the list was filtered.
+    if (name !== '' && name.length < 2) {
+        fail(invalid('query must be at least 2 characters.'));
+    }
+
+    return call(fetchImpl, 'GET', '/collections/debtors', {
+        query: { currency: optEnum(args, 'currency', DEBT_CURRENCIES), q: name, ...pageQuery(args) },
+    });
+}
+
+/** Cutoff states `GET /collections/cutoffs` filters by. */
+const CUTOFF_STATUSES = ['cut_off', 'active'];
+
+/**
+ * `list_cutoffs` — `GET /collections/cutoffs`, or `GET /subscribers/{id}/cutoffs` for one subscriber, with optional history.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function listCutoffs(args, fetchImpl) {
+    const history = optFlag(args, 'history');
+    const query = { status: optEnum(args, 'status', CUTOFF_STATUSES), history: history === true ? 1 : undefined, ...pageQuery(args) };
+    const subscriberId = await resolveSubscriberId(fetchImpl, args, { optional: true });
+
+    return call(fetchImpl, 'GET', subscriberId === null ? '/collections/cutoffs' : `/subscribers/${subscriberId}/cutoffs`, { query });
+}
+
 /** Windows `subscriber_usage` accepts. */
 const USAGE_WINDOWS = ['24h', '7d', '30d'];
 
@@ -2564,6 +2630,57 @@ const TOOLS = [
             per_page: { type: 'integer', description: 'Rows per page (API maximum 100).' },
         },
         listInvoices,
+    ),
+    readTool(
+        'get_invoice',
+        'Ver factura',
+        'Fetch one invoice by id (from list_invoices): header, subscriber_name, lines[] and payments[] (amount_cents, currency, method cash|transfer|other, '
+        + 'origin mercadopago|transfer|manual, received_at; never a payment memo). Payment does not change status: remaining debt is balance_cents. Amounts are cents of the invoice currency.',
+        { invoice_id: { type: 'integer', description: 'Invoice id, from list_invoices.' } },
+        getInvoice,
+        ['invoice_id'],
+    ),
+    readTool(
+        'get_account_statement',
+        'Ver cuenta corriente',
+        'Account statement of one subscriber: debt_by_currency (what is owed now, per currency: quote this) and the ledger entries, newest first '
+        + '(kind invoice|payment, invoice_id, method, currency, debit_cents, credit_cents). balance_cents is the running balance of that entry\'s currency only: '
+        + 'never add amounts of different currencies. Amounts are cents. Paged (page, per_page).',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            page: { type: 'integer', description: 'Page number, from 1.' },
+            per_page: { type: 'integer', description: 'Entries per page (default 20, API maximum 100).' },
+        },
+        getAccountStatement,
+    ),
+    readTool(
+        'list_debtors',
+        'Listar deudores',
+        'Subscribers with debt (issued invoices minus payments), one row per subscriber AND currency (currency, debt_cents), by currency and then debt descending: '
+        + 'a subscriber that owes in two currencies appears twice. meta.total_debt_by_currency totals every match per currency; never add currencies together. '
+        + 'Optional currency (ARS or USD) and name fragment (query, 2+ characters). Amounts are cents.',
+        {
+            currency: { type: 'string', enum: DEBT_CURRENCIES, description: 'Only the debt in this currency.' },
+            query: { type: 'string', description: 'Name fragment of the subscriber (2+ characters).' },
+            page: { type: 'integer', description: 'Page number, from 1.' },
+            per_page: { type: 'integer', description: 'Rows per page (default 20, API maximum 100).' },
+        },
+        listDebtors,
+    ),
+    readTool(
+        'list_cutoffs',
+        'Listar cortes por cobranza',
+        'Collections cutoffs: the current state of every subscriber ever cut off for debt, newest first (status cut_off, or active once reconnected; cutoff_reason, '
+        + 'cut_off_at, reconnected_at). debt_cents_at_cutoff comes with its debt_currency; when the currency is ambiguous both are null with debt_currency_reason: '
+        + 'then say "no disponible". Pass subscriber_id or subscriber_query for one subscriber; history=true adds each row\'s events (cutoff, reconnect), newest first.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            status: { type: 'string', enum: CUTOFF_STATUSES, description: 'cut_off (currently cut) or active (reconnected).' },
+            history: { type: 'boolean', description: 'Add the cutoff and reconnect events of each row. Default false.' },
+            page: { type: 'integer', description: 'Page number, from 1.' },
+            per_page: { type: 'integer', description: 'Rows per page (default 20, API maximum 100).' },
+        },
+        listCutoffs,
     ),
     readTool(
         'find_work_orders',

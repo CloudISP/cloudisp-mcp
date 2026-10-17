@@ -156,6 +156,10 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `list_internet_profiles` | `GET /internet-profiles` (`status`, por defecto `active`) | `profiles:read` | lectura |
 | `list_plans` | `GET /plans` | `plans:read` | lectura |
 | `list_invoices` | `GET /invoices` (`status`: `draft`, `issued`, `void`) | `invoices:read` | lectura |
+| `get_invoice` | `GET /invoices/{id}` (cabecera, líneas y pagos) | `invoices:read` | lectura |
+| `get_account_statement` | `GET /subscribers/{id}/account-statement` (deuda por moneda y asientos) | `invoices:read` | lectura |
+| `list_debtors` | `GET /collections/debtors` (`currency`: `ARS`, `USD`; `q`) | `invoices:read` | lectura |
+| `list_cutoffs` | `GET /collections/cutoffs` · `/subscribers/{id}/cutoffs` (`status`: `cut_off`, `active`; `history`) | `subscribers:read` | lectura |
 | `find_work_orders` · `get_work_order` | `GET /work-orders` · `/work-orders/{id}` | `work-orders:read` | lectura |
 | `find_technician` | `GET /employees?q=&assignable=1` | `employees:read` | lectura |
 | `network_snapshot` | `GET /operations/snapshot` (`platform_id` opcional) | `operations:read` | lectura |
@@ -261,6 +265,9 @@ responden `validation_failed` sin hacer ningún pedido:
   como `cpu` no es un id.
 - `list_onus` (`state`: `online`, `offline`, `unknown`, `absent`) y
   `list_invoices` (`status`: `draft`, `issued`, `void`).
+- `get_invoice`: `invoice_id` entero positivo. `list_debtors`: `currency` (`ARS`, `USD`) y `query` de
+  2 o más caracteres. `list_cutoffs`: `status` (`cut_off`, `active`) y `history` (`true`/`false`). Los
+  importes de estas herramientas son centavos por moneda y nunca se suman entre monedas.
 - `find_subscriber`: hace falta al menos uno de `query`, `document` (solo
   dígitos), `external_client_id` (solo dígitos) o `status` (`true`/`false`);
   se combinan con AND. `#N` es una búsqueda exacta y no se combina con los filtros.
