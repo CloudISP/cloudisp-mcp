@@ -14,6 +14,9 @@ herramientas no modifican nada: no hace falta confirmación.
 
 - Buscá con `query` (nombre, apellido, fragmento de documento o dirección; mínimo
   2 caracteres). Leé `meta.total` para saber cuántos coinciden.
+- Con el dato exacto, `find_subscriber` también filtra por `document` (solo
+  dígitos), `external_client_id` (solo dígitos) y `status` (`true`/`false`); se
+  combinan con AND y alcanza con uno. Un número de abonado (`#1234`) va solo.
 - Si hay varios, listá `id — nombre` y, para distinguir homónimos, la dirección
   o localidad. Preguntá cuál antes de seguir.
 - `get_subscriber` y el resto de las herramientas por abonado aceptan
@@ -22,11 +25,12 @@ herramientas no modifican nada: no hace falta confirmación.
 
 ## Perfiles, planes y facturas
 
-- `list_internet_profiles` (sin argumentos): `id`, nombre, `download_max_limit` y
+- `list_internet_profiles` (`status` opcional: `active` por defecto, `deprecated` o
+  `soft_deleted`): `id`, nombre, `download_max_limit` y
   `upload_max_limit` tal como vienen (Mbps). "Cuántos perfiles" = contá `data`.
 - `list_plans` (`status` opcional): planes comerciales con su `id`.
-- `list_invoices` (`subscriber_id`/`subscriber_query`, `status`): el pago no
-  cambia el `status`; la deuda es `balance_cents`.
+- `list_invoices` (`subscriber_id`/`subscriber_query`, `status`: `draft`, `issued`
+  o `void`): el pago no cambia el `status`; la deuda es `balance_cents`.
 
 ## Órdenes de trabajo — `find_work_orders`, `get_work_order`
 
@@ -43,7 +47,8 @@ herramientas no modifican nada: no hace falta confirmación.
 
 ## Red — ONUs, OLTs, routers, reportes
 
-- `list_onus` (`state`, `olt_id`, `pon_slot`, `pon_port`, `platform_id`,
+- `list_onus` (`state`: `online`, `offline`, `unknown` o `absent`, `olt_id`,
+  `pon_slot`, `pon_port`, `platform_id`,
   `product_class`, `firmware`, `offline_only`, abonado): `meta.total` es el
   conteo completo; para "cuántas ONUs offline hay" usá `state: offline` y
   `per_page: 1`. Modelos y firmware, consumo y tareas de equipo:

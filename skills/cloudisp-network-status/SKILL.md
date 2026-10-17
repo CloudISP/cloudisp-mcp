@@ -36,7 +36,10 @@ informá solo lo que devuelve:
   `routeros.health_check`, `routeros.test_command` (`command`: `/system/identity/print`, `/system/resource/print`, `/interface/print` o `/ip/address/print`) o `routeros.interface_monitor_traffic`.
 - **Alertas** — `network_alerts`.
 - **Métricas** — `device_metrics` (`kind`: `routeros` u `olt`, `device_id`): sin
-  `metric_ids` devuelve el catálogo; con `metric_ids`, las series.
+  `metric_ids` devuelve el catálogo (con `search`, `selected`, `limit`… para acotarlo);
+  con `metric_ids`, las series. Los ids son opacos (64 caracteres hexadecimales)
+  y salen del catálogo: nunca uses nombres como `cpu`. `window`: `15m`, `1h`, `6h`,
+  `24h`, `7d` o `30d`; `resolution`: `auto`, `raw` o `trend_1h`.
 - **Logs** — `platform_logs` (`platform_id` obligatorio, rango máx. 7 días): por
   ejemplo el syslog del router de las últimas 2 h filtrado por un usuario PPPoE
   (`q`).

@@ -347,6 +347,10 @@ test('get_task calls GET /tasks/{id}', async () => {
     assert.equal(result.status, 'running');
 });
 
+/** Two opaque metric ids as the catalogue hands them out: 64 lowercase hex characters. */
+const METRIC_A = 'a'.repeat(64);
+const METRIC_B = '0123456789abcdef'.repeat(4);
+
 test('list_onus maps state, subscriber, OLT, PON and paging onto the query string', async () => {
     const { calls } = await run(
         'list_onus',
@@ -411,13 +415,13 @@ test('device_metrics asks for the catalogue, or for the series with metric_id[]'
 
     const series = await run(
         'device_metrics',
-        { kind: 'routeros', device_id: 3, metric_ids: ['cpu', 'mem'], window: '24h', resolution: '5m' },
+        { kind: 'routeros', device_id: 3, metric_ids: [METRIC_A, METRIC_B], window: '24h', resolution: 'trend_1h' },
         routes,
     );
     assert.deepEqual(sig(series.calls), ['GET /network/devices/routeros/3/metrics/series']);
-    assert.deepEqual(series.calls[0].query.getAll('metric_id[]'), ['cpu', 'mem']);
+    assert.deepEqual(series.calls[0].query.getAll('metric_id[]'), [METRIC_A, METRIC_B]);
     assert.equal(series.calls[0].query.get('window'), '24h');
-    assert.equal(series.calls[0].query.get('resolution'), '5m');
+    assert.equal(series.calls[0].query.get('resolution'), 'trend_1h');
 
     assert.equal((await run('device_metrics', { kind: 'onu', device_id: 1 }, routes)).result.outcome, 'validation_failed');
 });
@@ -1069,7 +1073,7 @@ test('initialize hands over the condensed core rules, cloudisp_context first', a
 
     const { instructions, serverInfo } = decodeMessages(Buffer.from(written.join(''), 'utf8'))[0].result;
 
-    assert.equal(serverInfo.version, '0.5.0');
+    assert.equal(serverInfo.version, '0.5.2');
     assert.ok(instructions.startsWith('Llamá cloudisp_context al iniciar cada conversación y antes de delegar'));
     assert.equal(instructions.split('\n').length, 6);
 });
@@ -1327,7 +1331,7 @@ test('stdio smoke: newline framing answers initialize and lists every tool with 
     const initialize = messages.find((message) => message.id === 1);
     assert.equal(initialize.result.protocolVersion, '2025-06-18');
     assert.equal(initialize.result.serverInfo.name, 'cloudisp-mcp');
-    assert.equal(initialize.result.serverInfo.version, '0.5.0');
+    assert.equal(initialize.result.serverInfo.version, '0.5.2');
     assert.match(initialize.result.instructions, /CLOUDISP_ALLOW_WRITES=1/);
     assert.ok(initialize.result.capabilities.tools);
 
@@ -2085,8 +2089,9 @@ test('export_report saves the PDF in the artifact directory and answers its MEDI
     assert.deepEqual(fs.readFileSync(result.path), pdf);
     assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
     assert.equal(calls[0].query.get('format'), 'pdf');
-    assert.equal(calls[0].query.get('from'), '2026-10-01');
-    assert.equal(calls[0].query.get('to'), '2026-10-15');
+    assert.equal(calls[0].query.get('filter_period'), '2026-10-01,2026-10-15');
+    assert.equal(calls[0].query.has('from'), false);
+    assert.equal(calls[0].query.has('to'), false);
     assert.equal(calls[0].query.get('platform_id'), '2');
     assert.equal(calls[0].headers['X-CloudISP-Tool'], 'export_report');
     assert.equal(calls[0].headers['X-CloudISP-Operator-Id'], 'telegram:941533777');
@@ -2330,5 +2335,242 @@ test('the guide markup survives the Telegram adapter: only **bold** pairs, no un
 
     for (const line of examples) {
         assert.match(line, /^• \*\*[^*]+\*\*( ✍️)? — ejemplo: «[^«»]+»$/, line);
+    }
+});
+
+// ─── v0.5.2: API contract fixes (audit 2026-10-16: M1, M5, M7, M9, M12-M15, M18) ──
+
+/**
+ * @param {string} name Tool name.
+ * @return {{ description: string, inputSchema: object }} The tool as `tools/list` shows it (writes on).
+ */
+function toolSchema(name) {
+    return listTools(WRITES_ON).find((tool) => tool.name === name);
+}
+
+/**
+ * Run a tool against an empty route table: it must answer `validation_failed` and never reach `fetch`.
+ *
+ * @param {string} name Tool name.
+ * @param {object} args Tool arguments.
+ * @return {Promise<void>}
+ */
+async function assertRefused(name, args) {
+    const { result, calls } = await run(name, args);
+
+    assert.equal(result.outcome, 'validation_failed', `${name} ${JSON.stringify(args)}`);
+    assert.equal(calls.length, 0, `${name} ${JSON.stringify(args)} reached the API`);
+}
+
+test('M1: olt_read does not offer olt.unprovisioned_onus_read (the API refuses it) and refuses it before any HTTP call', async () => {
+    const tool = toolSchema('olt_read');
+
+    assert.deepEqual(tool.inputSchema.properties.operation.enum, ['olt.health_check', 'olt.system_info_read', 'olt.mac_table_read', 'olt.poll']);
+    assert.equal(tool.description.includes('unprovisioned'), false);
+
+    await assertRefused('olt_read', { olt_id: 6, operation: 'olt.unprovisioned_onus_read' });
+});
+
+test('M9: device_metrics checks window, resolution and metric ids before any HTTP call', async () => {
+    const { description, inputSchema } = toolSchema('device_metrics');
+
+    assert.deepEqual(inputSchema.properties.window.enum, ['15m', '1h', '6h', '24h', '7d', '30d']);
+    assert.deepEqual(inputSchema.properties.resolution.enum, ['auto', 'raw', 'trend_1h']);
+    assert.equal(inputSchema.properties.metric_ids.maxItems, 8);
+    assert.match(description, /must be taken from the catalogue: call without metric_ids first/);
+
+    const base = { kind: 'routeros', device_id: 3 };
+    const nine = Array.from({ length: 9 }, (_, index) => String(index).repeat(64));
+
+    for (const extra of [
+        { metric_ids: ['cpu'] },
+        { metric_ids: [METRIC_A], window: '5m' },
+        { metric_ids: [METRIC_A], resolution: '5m' },
+        { metric_ids: [METRIC_A.toUpperCase()] },
+        { metric_ids: ['a'.repeat(63)] },
+        { metric_ids: [METRIC_A, 7] },
+        { metric_ids: nine },
+        { metric_ids: METRIC_A },
+    ]) {
+        await assertRefused('device_metrics', { ...base, ...extra });
+    }
+
+    const eight = nine.slice(0, 8);
+    const { calls } = await run('device_metrics', { ...base, metric_ids: eight }, {
+        'GET /network/devices/routeros/3/metrics/series': jsonResponse({ success: true, data: [] }),
+    });
+
+    assert.deepEqual(calls[0].query.getAll('metric_id[]'), eight);
+    assert.equal(calls[0].query.has('window'), false, 'the API default (24h) applies');
+    assert.equal(calls[0].query.has('resolution'), false, 'the API default (auto) applies');
+});
+
+test('M15: device_metrics passes the catalogue filters and paging through, and checks their bounds', async () => {
+    const routes = { 'GET /network/devices/olt/6/metrics/catalog': jsonResponse({ success: true, data: [] }) };
+    const { calls } = await run('device_metrics', {
+        kind: 'olt', device_id: 6, search: 'rx power', family_id: METRIC_A, template_id: METRIC_B, state: 'active', selected: true, cursor: 'c-1.2:3', limit: 50,
+    }, routes);
+
+    assert.deepEqual(sig(calls), ['GET /network/devices/olt/6/metrics/catalog']);
+    assert.deepEqual(Object.fromEntries(calls[0].query), {
+        search: 'rx power', family_id: METRIC_A, template_id: METRIC_B, state: 'active', selected: '1', cursor: 'c-1.2:3', limit: '50',
+    });
+
+    const unselected = await run('device_metrics', { kind: 'olt', device_id: 6, selected: false, limit: 500 }, routes);
+
+    assert.deepEqual(Object.fromEntries(unselected.calls[0].query), { selected: '0', limit: '500' });
+
+    for (const extra of [{ limit: 0 }, { limit: 501 }, { family_id: 'x' }, { template_id: METRIC_A.toUpperCase() }, { selected: 'maybe' }]) {
+        await assertRefused('device_metrics', { kind: 'olt', device_id: 6, ...extra });
+    }
+
+    const series = await run('device_metrics', { kind: 'olt', device_id: 6, metric_ids: [METRIC_A], search: 'rx' }, {
+        'GET /network/devices/olt/6/metrics/series': jsonResponse({ success: true, data: [] }),
+    });
+
+    assert.equal(series.calls[0].query.has('search'), false, 'catalogue filters never travel with a series call');
+});
+
+test('M12: export_report sends the period as filter_period and passes the free filters like run_report', async () => {
+    const csv = { 'GET /reports/workorders': fileResponse(Buffer.from('a;b\n'), 'text/csv') };
+    const { calls } = await runWithArtifacts('export_report', {
+        key: 'workorders',
+        format: 'csv',
+        from: '2026-10-01',
+        to: '2026-10-15',
+        platform_id: 2,
+        filters: { filter_granularity: 'week', filter_status: 'open', format: 'pdf', filter_period: '2020-01-01,2020-01-02' },
+    }, csv);
+
+    assert.deepEqual(Object.fromEntries(calls[0].query), {
+        filter_granularity: 'week', filter_status: 'open', format: 'csv', platform_id: '2', filter_period: '2026-10-01,2026-10-15',
+    }, 'from/to win over a filter_period filter, and no filter can change the format');
+
+    const free = await runWithArtifacts('export_report', {
+        key: 'workorders', format: 'csv', filters: { filter_period: '2026-09-01,2026-09-30' },
+    }, csv);
+
+    assert.deepEqual(Object.fromEntries(free.calls[0].query), { format: 'csv', filter_period: '2026-09-01,2026-09-30' });
+
+    for (const args of [{ from: '2026-10-01' }, { to: '2026-10-15' }]) {
+        const refused = await runWithArtifacts('export_report', { key: 'workorders', format: 'csv', ...args });
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.calls.length, 0);
+    }
+
+    assert.equal(toolSchema('export_report').inputSchema.properties.filters.type, 'object');
+});
+
+test('M13: disconnect_subscriber keeps the work order external_ref within 100 characters for a longer idempotency key', async () => {
+    const routes = {
+        'POST /subscribers/42/disconnect': jsonResponse({ success: true, data: { id: 42, lifecycle_status: 'disconnected' } }),
+        'POST /work-orders': jsonResponse({ success: true, data: { id: 77 } }),
+    };
+    const disconnect = (key) => run('disconnect_subscriber', { ...WRITE_ARGS, idempotency_key: key, subscriber_id: 42, open_work_order: true }, routes);
+
+    const longKey = 'k'.repeat(128);
+    const first = await disconnect(longKey);
+    const ref = first.calls[1].body.external_ref;
+
+    assert.equal(first.calls[0].headers['Idempotency-Key'], longKey, 'the disconnect itself keeps the full key');
+    assert.ok(ref.length <= 100, `external_ref has ${ref.length} characters`);
+    assert.notEqual(ref, longKey);
+    assert.equal(first.result.work_order.data.id, 77);
+    assert.equal((await disconnect(longKey)).calls[1].body.external_ref, ref, 'the same key gives the same ref, so a replay stays idempotent');
+    assert.notEqual((await disconnect(`${'k'.repeat(127)}j`)).calls[1].body.external_ref, ref, 'another key gives another ref');
+
+    const fits = 'e'.repeat(100);
+
+    assert.equal((await disconnect(fits)).calls[1].body.external_ref, fits, 'a key that fits is used as is');
+    assert.ok((await disconnect('e'.repeat(101))).calls[1].body.external_ref.length <= 100);
+});
+
+test('M18: list_onus and list_invoices offer only the states the API knows and refuse others before any HTTP call', async () => {
+    const onus = toolSchema('list_onus');
+    const invoices = toolSchema('list_invoices');
+
+    assert.deepEqual(onus.inputSchema.properties.state.enum, ['online', 'offline', 'unknown', 'absent']);
+    assert.equal(/\blos\b/i.test(JSON.stringify(onus)), false, 'los is not an ONU state');
+    assert.deepEqual(invoices.inputSchema.properties.status.enum, ['draft', 'issued', 'void']);
+
+    for (const state of ['online', 'offline', 'unknown', 'absent']) {
+        const { calls } = await run('list_onus', { state }, { 'GET /network/onus': jsonResponse({ success: true, data: [], meta: { total: 0 } }) });
+
+        assert.equal(calls[0].query.get('state'), state);
+    }
+
+    for (const status of ['draft', 'issued', 'void']) {
+        const { calls } = await run('list_invoices', { status }, { 'GET /invoices': jsonResponse({ success: true, data: [], meta: { total: 0 } }) });
+
+        assert.equal(calls[0].query.get('status'), status);
+    }
+
+    await assertRefused('list_onus', { state: 'los' });
+    await assertRefused('list_invoices', { status: 'paid' });
+});
+
+test('M5: find_subscriber passes status, document and external_client_id and needs at least one criterion', async () => {
+    const routes = { 'GET /subscribers': ONE_SUBSCRIBER };
+    const filtered = await run('find_subscriber', { document: '30111222', external_client_id: 991, status: true }, routes);
+
+    assert.deepEqual(sig(filtered.calls), ['GET /subscribers']);
+    assert.deepEqual(Object.fromEntries(filtered.calls[0].query), { document: '30111222', external_client_id: '991', status: 'true' });
+
+    const combined = await run('find_subscriber', { query: 'Perez', status: '0' }, routes);
+
+    assert.deepEqual(Object.fromEntries(combined.calls[0].query), { q: 'Perez', status: 'false' });
+
+    const byStatus = await run('find_subscriber', { status: false }, routes);
+
+    assert.deepEqual(Object.fromEntries(byStatus.calls[0].query), { status: 'false' });
+
+    for (const args of [
+        {}, { query: '  ' }, { document: '30.111.222' }, { document: 'abc' }, { external_client_id: '12a' },
+        { external_client_id: '9'.repeat(20) }, { status: 'maybe' }, { query: '#42', status: true }, { query: '#42', document: '30111222' },
+    ]) {
+        await assertRefused('find_subscriber', args);
+    }
+
+    const byNumber = await run('find_subscriber', { query: '#42' }, { 'GET /subscribers/42': jsonResponse({ success: true, data: { id: 42 } }) });
+
+    assert.deepEqual(sig(byNumber.calls), ['GET /subscribers/42'], '#N keeps its exact lookup');
+    assert.equal(toolSchema('find_subscriber').inputSchema.required, undefined, 'any one criterion is enough');
+});
+
+test('M7: list_internet_profiles lists active profiles by default and the other lifecycle statuses on request', async () => {
+    const routes = { 'GET /internet-profiles': jsonResponse({ success: true, data: [], meta: { total: 0 } }) };
+    const byDefault = await run('list_internet_profiles', {}, routes);
+
+    assert.deepEqual(Object.fromEntries(byDefault.calls[0].query), { status: 'active', per_page: '100' });
+
+    for (const status of ['active', 'deprecated', 'soft_deleted']) {
+        const { calls } = await run('list_internet_profiles', { status }, routes);
+
+        assert.deepEqual(Object.fromEntries(calls[0].query), { status, per_page: '100' });
+    }
+
+    assert.deepEqual(toolSchema('list_internet_profiles').inputSchema.properties.status.enum, ['active', 'deprecated', 'soft_deleted']);
+
+    await assertRefused('list_internet_profiles', { status: 'draft' });
+});
+
+test('M14: locate_new_onu narrows the search to one OLT with olt_id and sends {mac} alone otherwise', async () => {
+    const routes = {
+        'POST /subscribers/42/onu/swap/locate': jsonResponse({
+            success: true,
+            data: { tasks: [{ olt_id: 6, olt_name: 'OLT 6', task_run_id: 11, request_id: 'r11' }], errors: [] },
+        }, 202),
+        'GET /tasks/11': jsonResponse(taskProjection(11, 'succeeded', { matches: [] })),
+    };
+    const args = { ...WRITE_ARGS, subscriber_id: 42, mac: 'B4:64:15:1B:DE:68' };
+
+    assert.deepEqual((await run('locate_new_onu', { ...args, olt_id: 6 }, routes)).calls[0].body, { mac: 'B4:64:15:1B:DE:68', olt_id: 6 });
+    assert.deepEqual((await run('locate_new_onu', { ...args, olt_id: '6' }, routes)).calls[0].body, { mac: 'B4:64:15:1B:DE:68', olt_id: 6 });
+    assert.deepEqual((await run('locate_new_onu', args, routes)).calls[0].body, { mac: 'B4:64:15:1B:DE:68' });
+    assert.equal(toolSchema('locate_new_onu').inputSchema.properties.olt_id.type, 'integer');
+
+    for (const oltId of [0, -1, 1.5, 'x']) {
+        await assertRefused('locate_new_onu', { ...args, olt_id: oltId });
     }
 });
