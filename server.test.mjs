@@ -53,7 +53,7 @@ function errorResponse(status, error) {
 const READ_TOOL_NAMES = [
     'cloudisp_context', 'search_knowledge', 'find_subscriber', 'get_subscriber', 'diagnose_subscriber',
     'onu_read', 'onu_diagnose', 'get_task', 'list_onus', 'list_olts', 'get_olt', 'olt_read',
-    'list_routers', 'router_read', 'network_alerts', 'device_metrics', 'platform_logs', 'list_reports',
+    'list_routers', 'router_read', 'network_alerts', 'get_alert', 'device_metrics', 'platform_logs', 'list_reports',
     'run_report', 'list_internet_profiles', 'list_plans', 'list_invoices', 'find_work_orders',
     'get_work_order', 'find_technician', 'network_snapshot',
     'list_onu_models', 'subscriber_usage', 'usage_ranking', 'device_tasks', 'get_router', 'olt_poll_runs',
@@ -399,6 +399,66 @@ test('list_olts, get_olt, list_routers and network_alerts map onto their endpoin
     const alerts = await run('network_alerts', { limit: 5 }, routes);
     assert.deepEqual(sig(alerts.calls), ['GET /network/alerts']);
     assert.equal(alerts.calls[0].query.get('limit'), '5');
+});
+
+test('list_onus sends the serial and MAC filters trimmed and returns the optical block of each row', async () => {
+    const optical = { rx_dbm: -19.5, band: 'ok', measured_at: '2026-10-15T07:00:00+00:00', measured_by: 'olt' };
+    const { result, calls } = await run(
+        'list_onus',
+        { serial: ' HWTC0000AAAA ', serial_prefix: 'HWTC', mac: 'aa:bb:cc:dd:ee:01', mac_prefix: 'aa:bb:cc' },
+        { 'GET /network/onus': jsonResponse({ success: true, data: [{ id: 91, serial_number: 'HWTC0000AAAA', optical }, { id: 94, optical: null }], meta: { total: 2 } }) },
+    );
+
+    assert.deepEqual(sig(calls), ['GET /network/onus']);
+    assert.deepEqual(Object.fromEntries(calls[0].query), { serial: 'HWTC0000AAAA', serial_prefix: 'HWTC', mac: 'aa:bb:cc:dd:ee:01', mac_prefix: 'aa:bb:cc' });
+    assert.equal(result.data[0].optical.rx_dbm, -19.5);
+    assert.equal(result.data[0].optical.band, 'ok');
+    assert.equal(result.data[1].optical, null);
+
+    const bare = await run('list_onus', {}, { 'GET /network/onus': jsonResponse({ success: true, data: [], meta: { total: 0 } }) });
+    assert.deepEqual(Object.fromEntries(bare.calls[0].query), {}, 'No filter given, none sent.');
+});
+
+test('network_alerts maps every filter onto the query string and refuses an unknown status or severity before any request', async () => {
+    const ok = jsonResponse({ success: true, data: [], meta: { total: 0 } });
+    const { calls } = await run(
+        'network_alerts',
+        { status: 'closed', severity: 'critical', type: ' olt_unreachable ', olt_id: 6, device_id: 2, since: '2026-10-15', until: '2026-10-16T12:00:00-03:00', limit: 10, page: 2 },
+        { 'GET /network/alerts': ok },
+    );
+
+    assert.deepEqual(sig(calls), ['GET /network/alerts']);
+    assert.deepEqual(Object.fromEntries(calls[0].query), {
+        status: 'closed', severity: 'critical', type: 'olt_unreachable', olt_id: '6', device_id: '2', since: '2026-10-15', until: '2026-10-16T12:00:00-03:00', limit: '10', page: '2',
+    });
+
+    const bare = await run('network_alerts', {}, { 'GET /network/alerts': ok });
+    assert.deepEqual(Object.fromEntries(bare.calls[0].query), {}, 'No filter given, none sent: the API default (active alerts) applies.');
+
+    for (const args of [{ status: 'resolved' }, { severity: 'fatal' }, { olt_id: 'x' }, { device_id: 0 }]) {
+        const refused = await run('network_alerts', args, { 'GET /network/alerts': ok });
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.calls.length, 0);
+    }
+});
+
+test('get_alert calls GET /network/alerts/{id} and requires an alert id', async () => {
+    const detail = { id: 2, status: 'acknowledged', acknowledged_by_name: 'Ana Técnica', transitions: [], client: null };
+    const { result, calls } = await run('get_alert', { alert_id: 2 }, { 'GET /network/alerts/2': jsonResponse({ success: true, data: detail }) });
+
+    assert.deepEqual(sig(calls), ['GET /network/alerts/2']);
+    assert.equal(result.data.acknowledged_by_name, 'Ana Técnica');
+
+    for (const args of [{}, { alert_id: 0 }, { alert_id: 'abc' }]) {
+        const refused = await run('get_alert', args);
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(args));
+        assert.equal(refused.calls.length, 0);
+    }
+
+    const gone = await run('get_alert', { alert_id: 999 }, { 'GET /network/alerts/999': errorResponse(404, { code: 'not_found', message: 'Not found.' }) });
+    assert.equal(gone.result.ok, false);
 });
 
 test('olt_read and router_read post to their reads endpoint and await the task', async () => {
@@ -2354,10 +2414,10 @@ test('the report tools are read-only and tell the agent to include the media lin
 
 const PLUGIN_DIR = new URL('./hermes-plugin/cloudisp/', import.meta.url);
 
-test('every tool carries a guide entry in one of the fixed categories, and the 60 tools are all there', () => {
+test('every tool carries a guide entry in one of the fixed categories, and every listed tool is there', () => {
     const catalog = guideCatalog();
 
-    assert.equal(catalog.length, 60);
+    assert.equal(catalog.length, READ_TOOL_NAMES.length + WRITE_TOOL_NAMES.length);
 
     for (const tool of catalog) {
         assert.ok(tool.guide, `${tool.name} has no guide entry`);

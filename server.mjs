@@ -1188,6 +1188,10 @@ async function listOnus(args, fetchImpl) {
             platform_id: optInt(args, 'platform_id'),
             product_class: asTrimmedString(args.product_class),
             firmware: asTrimmedString(args.firmware),
+            serial: asTrimmedString(args.serial),
+            serial_prefix: asTrimmedString(args.serial_prefix),
+            mac: asTrimmedString(args.mac),
+            mac_prefix: asTrimmedString(args.mac_prefix),
             offline_only: args.offline_only === true ? 1 : undefined,
             ...pageQuery(args),
         },
@@ -1267,15 +1271,44 @@ async function routerRead(args, fetchImpl, clock) {
     return postRead(fetchImpl, clock, `/network/routers/${routerId}/reads`, operation, { parameters });
 }
 
+/** Alert statuses `GET /network/alerts` filters by (`active` is open or acknowledged, the API default; `all` lifts the filter). */
+const ALERT_STATUSES = ['open', 'acknowledged', 'closed', 'active', 'all'];
+
+/** Alert severities `GET /network/alerts` filters by. */
+const ALERT_SEVERITIES = ['critical', 'warning', 'info'];
+
 /**
- * `network_alerts` — `GET /network/alerts?limit=`.
+ * `network_alerts` — `GET /network/alerts`, filtered and paged.
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
  * @return {Promise<object>} Public API envelope.
  */
 async function networkAlerts(args, fetchImpl) {
-    return call(fetchImpl, 'GET', '/network/alerts', { query: { limit: optInt(args, 'limit') } });
+    return call(fetchImpl, 'GET', '/network/alerts', {
+        query: {
+            status: optEnum(args, 'status', ALERT_STATUSES),
+            severity: optEnum(args, 'severity', ALERT_SEVERITIES),
+            type: asTrimmedString(args.type),
+            olt_id: optInt(args, 'olt_id'),
+            device_id: optInt(args, 'device_id'),
+            since: asTrimmedString(args.since),
+            until: asTrimmedString(args.until),
+            limit: optInt(args, 'limit'),
+            page: optInt(args, 'page'),
+        },
+    });
+}
+
+/**
+ * `get_alert` — `GET /network/alerts/{id}`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function getAlert(args, fetchImpl) {
+    return call(fetchImpl, 'GET', `/network/alerts/${requireId(args, 'alert_id')}`);
 }
 
 /** Windows the series endpoint accepts (the API default is `24h`). */
@@ -2441,9 +2474,12 @@ const TOOLS = [
     readTool(
         'list_onus',
         'Listar ONUs',
-        'List ONUs of the visible platforms, optionally filtered by state (online, offline, unknown, absent), subscriber, OLT, PON, platform, model (product_class) or firmware, '
-        + 'or only the offline ones. Each row carries olt, pon_slot, pon_port, state, client_id, last_seen_at, offline_since, acs {product_class, firmware, adapter, sync_template, '
-        + 'last_inform_at, wifi_channel_24, wifi_channel_5} (null when the ONU has no ACS data) and client {id, name}. meta.total is the full count: use per_page=1 to only count.',
+        'List ONUs of the visible platforms, optionally filtered by state (online, offline, unknown, absent), subscriber, OLT, PON, platform, model (product_class), firmware, '
+        + 'serial or MAC (exact or prefix), or only the offline ones: with a serial or MAC from a label or a ticket, the row names the subscriber (client) and the PON. '
+        + 'Each row carries olt, pon_slot, pon_port, serial_number, mac_address, state, client_id, last_seen_at, offline_since, acs {product_class, firmware, adapter, sync_template, '
+        + 'last_inform_at, wifi_channel_24, wifi_channel_5} (null when the ONU has no ACS data), client {id, name} and optical {rx_dbm, band, measured_at, measured_by} '
+        + '(the newest receive-power reading, null when there is none in the last 3 days: "no disponible", never 0). band is ok from -25 dBm, warning from -28 to below -25 and critical below -28; '
+        + 'there is no TX or temperature. meta.total is the full count: use per_page=1 to only count.',
         {
             state: { type: 'string', enum: ONU_STATES, description: 'ONU state filter (absent: no longer registered on the OLT).' },
             ...SUBSCRIBER_PROPERTIES,
@@ -2453,6 +2489,10 @@ const TOOLS = [
             platform_id: { type: 'integer', description: 'Only ONUs of this platform (id from cloudisp_context).' },
             product_class: { type: 'string', description: 'Exact model (ACS product_class), case-insensitive, as listed by list_onu_models.' },
             firmware: { type: 'string', description: 'Exact firmware version, case-insensitive, as listed by list_onu_models.' },
+            serial: { type: 'string', description: 'Exact ONU serial number, case-insensitive (e.g. from the label).' },
+            serial_prefix: { type: 'string', description: 'ONU serial starting with these 3 to 64 characters (e.g. the vendor prefix HWTC).' },
+            mac: { type: 'string', description: 'Exact ONU MAC address, 12 hex digits with or without separators (aa:bb:cc:dd:ee:ff, aabb.ccdd.eeff).' },
+            mac_prefix: { type: 'string', description: 'ONU MAC starting with these 4 to 12 hex digits, separators ignored (e.g. the vendor OUI aa:bb:cc).' },
             offline_only: { type: 'boolean', description: 'Only offline ONUs.' },
             page: { type: 'integer', description: 'Page number, from 1.' },
             per_page: { type: 'integer', description: 'Rows per page (API maximum 100).' },
@@ -2490,7 +2530,7 @@ const TOOLS = [
     readTool(
         'list_routers',
         'Listar routers',
-        'List the MikroTik routers of the visible platforms with a health summary. Host credentials are never exposed.',
+        'List the MikroTik routers of the visible platforms with a health summary: id (the router_id other tools take), name, status, lifecycle_status (active, degraded, disabled), last_health_state and breaker_state. Host credentials are never exposed.',
         {},
         listRouters,
     ),
@@ -2512,9 +2552,33 @@ const TOOLS = [
     readTool(
         'network_alerts',
         'Alertas de red',
-        'Recent network alerts of the visible platforms.',
-        { limit: { type: 'integer', description: 'Maximum alerts to return.' } },
+        'Network alerts of the visible platforms, newest first, with meta.total. By default only the active ones (open or acknowledged); status closed or all brings the history. '
+        + 'Filter by status (open, acknowledged, closed, active, all), severity (critical, warning, info), type (alert type, e.g. onu_optical_power, olt_unreachable), '
+        + 'olt_id, device_id (the router) and since/until (ISO 8601 bounds of the last detection). Each row carries id, severity, status, type, type_label, title, message, '
+        + 'device_id (null for an OLT, PON or ONU alert), olt_id, onu_id, client_id, pon_slot, pon_port, version, source, occurrence_count, opened_at, last_detected_at, '
+        + 'acknowledged_at, closed_at and closed_reason; use get_alert for the evidence, the transitions and who acknowledged or closed it.',
+        {
+            status: { type: 'string', enum: ALERT_STATUSES, description: 'Alert state (default active: open or acknowledged; all: every state).' },
+            severity: { type: 'string', enum: ALERT_SEVERITIES, description: 'Only alerts of this severity.' },
+            type: { type: 'string', description: 'Only alerts of this type, as returned in the rows (e.g. onu_optical_power).' },
+            olt_id: { type: 'integer', description: 'Only alerts about this OLT.' },
+            device_id: { type: 'integer', description: 'Only alerts about this router (id from list_routers).' },
+            since: { type: 'string', description: 'Only alerts last detected at or after this ISO 8601 date or date-time.' },
+            until: { type: 'string', description: 'Only alerts last detected at or before this ISO 8601 date or date-time.' },
+            limit: { type: 'integer', description: 'Alerts per page (API maximum 100, default 20).' },
+            page: { type: 'integer', description: 'Page number, from 1.' },
+        },
         networkAlerts,
+    ),
+    readTool(
+        'get_alert',
+        'Ver alerta de red',
+        'One network alert (id from network_alerts): lifecycle (opened, first and last detected, occurrence_count, version), who acknowledged and resolved it by name, closed_reason, '
+        + 'the latest evidence (metric, value, threshold, window), the newest transitions, and what it is about: device (router), olt, onu (serial, PON, state and its latest optical reading), '
+        + 'rule, client_id and, when the key may read subscribers, client {id, name}. A missing value is null.',
+        { alert_id: { type: 'integer', description: 'Alert id from network_alerts.' } },
+        getAlert,
+        ['alert_id'],
     ),
     readTool(
         'device_metrics',

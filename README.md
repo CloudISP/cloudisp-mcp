@@ -142,12 +142,13 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `onu_read` | `POST /subscribers/{id}/onu/reads` + `GET /tasks/{id}` (incluye `onu.wifi_password_check`) | `devices:read` | lectura |
 | `onu_diagnose` | `POST /subscribers/{id}/onu/diagnose` + `GET /tasks/{id}` | `devices:read` | lectura |
 | `get_task` | `GET /tasks/{id}` (`wait_seconds` espera a que termine) | `devices:read` | lectura |
-| `list_onus` | `GET /network/onus` (estado, modelo, firmware, plataforma, solo offline) | `network:read` | lectura |
+| `list_onus` | `GET /network/onus` (estado, modelo, firmware, plataforma, solo offline, serial y MAC exactos o por prefijo; trae `optical`) | `network:read` | lectura |
 | `list_olts` · `get_olt` | `GET /network/olts` · `/network/olts/{id}` | `network:read` | lectura |
 | `olt_read` | `POST /network/olts/{id}/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
-| `list_routers` | `GET /network/routers` | `network:read` | lectura |
+| `list_routers` | `GET /network/routers` (con `id` y `lifecycle_status`) | `network:read` | lectura |
 | `router_read` | `POST /network/routers/{id}/reads` + `GET /tasks/{id}` | `devices:read` | lectura |
-| `network_alerts` | `GET /network/alerts` | `network:read` | lectura |
+| `network_alerts` | `GET /network/alerts` (`status`, `severity`, `type`, `olt_id`, `device_id`, `since`, `until`, `limit`, `page`) | `network:read` | lectura |
+| `get_alert` | `GET /network/alerts/{id}` | `network:read` (el nombre del abonado, además `subscribers:read`) | lectura |
 | `device_metrics` | `GET /network/devices/{kind}/{id}/metrics/catalog` (con `search`, `family_id`, `template_id`, `state`, `selected`, `cursor`, `limit`) · `/series` | `network:read` | lectura |
 | `platform_logs` | `GET /logs/events` | `network:read` | lectura |
 | `list_reports` · `run_report` | `GET /reports` · `/reports/{key}` | `reports:read` | lectura |
@@ -264,8 +265,20 @@ responden `validation_failed` sin hacer ningún pedido:
   llamada sin `metric_ids`, que también acepta `search`, `family_id`,
   `template_id`, `state`, `selected`, `cursor` y `limit` de 1 a 500); un nombre
   como `cpu` no es un id.
-- `list_onus` (`state`: `online`, `offline`, `unknown`, `absent`) y
-  `list_invoices` (`status`: `draft`, `issued`, `void`).
+- `list_onus` (`state`: `online`, `offline`, `unknown`, `absent`),
+  `list_invoices` (`status`: `draft`, `issued`, `void`) y `network_alerts`
+  (`status`: `open`, `acknowledged`, `closed`, `active`, `all`; `severity`:
+  `critical`, `warning`, `info`).
+- `list_onus` con `serial` / `mac` (exactos; el MAC acepta cualquier separador y
+  mayúsculas) o `serial_prefix` (3 a 64 caracteres) / `mac_prefix` (4 a 12 dígitos
+  hexadecimales): sirve para pasar de la etiqueta de una ONU al abonado y al PON.
+  Cada fila trae `optical` (`rx_dbm`, `band`, `measured_at`, `measured_by`; `null`
+  si no hay lectura en los últimos 3 días, nunca `0`); `band` usa las bandas del
+  admin: `ok` desde −25 dBm, `warning` hasta −28 y `critical` por debajo.
+- `network_alerts` lista solo las alertas activas (abiertas o reconocidas) salvo
+  que se pida otro `status`; `get_alert` trae la evidencia, las transiciones y
+  quién la reconoció o cerró. El nombre del abonado afectado solo viene si la clave
+  tiene `subscribers:read`.
 - `get_invoice`: `invoice_id` entero positivo. `list_debtors`: `currency` (`ARS`, `USD`) y `query` de
   2 o más caracteres. `list_cutoffs`: `status` (`cut_off`, `active`) y `history` (`true`/`false`). Los
   importes de estas herramientas son centavos por moneda y nunca se suman entre monedas.
