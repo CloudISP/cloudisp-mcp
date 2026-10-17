@@ -1246,7 +1246,7 @@ test('initialize hands over the condensed core rules, cloudisp_context first', a
 
     const { instructions, serverInfo } = decodeMessages(Buffer.from(written.join(''), 'utf8'))[0].result;
 
-    assert.equal(serverInfo.version, '0.5.3');
+    assert.equal(serverInfo.version, '0.6.0');
     assert.ok(instructions.startsWith('Llamá cloudisp_context al iniciar cada conversación y antes de delegar'));
     assert.equal(instructions.split('\n').length, 6);
 });
@@ -1504,7 +1504,7 @@ test('stdio smoke: newline framing answers initialize and lists every tool with 
     const initialize = messages.find((message) => message.id === 1);
     assert.equal(initialize.result.protocolVersion, '2025-06-18');
     assert.equal(initialize.result.serverInfo.name, 'cloudisp-mcp');
-    assert.equal(initialize.result.serverInfo.version, '0.5.3');
+    assert.equal(initialize.result.serverInfo.version, '0.6.0');
     assert.match(initialize.result.instructions, /CLOUDISP_ALLOW_WRITES=1/);
     assert.ok(initialize.result.capabilities.tools);
 

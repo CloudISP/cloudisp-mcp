@@ -103,8 +103,8 @@ Cada vez que el motor carga el plugin (una vez por home: el del host y el de cad
 última, con el estado de los parches:
 
 ```
-CLOUDISP_PLUGIN_READY patches=ok version=0.5.3 write_tools=19 middleware=ok locale=ok profile=cloudisp-nvs
-CLOUDISP_PLUGIN_READY patches=failed:mark_recommended,send_exec_approval version=0.5.3 ...
+CLOUDISP_PLUGIN_READY patches=ok version=0.6.0 write_tools=19 middleware=ok locale=ok profile=cloudisp-nvs
+CLOUDISP_PLUGIN_READY patches=failed:mark_recommended,send_exec_approval version=0.6.0 ...
 ```
 
 Nivel `INFO` si todo está bien; `WARNING` si faltó el middleware o el pack de textos; `ERROR` si algún parche falló. Cada parche que no
