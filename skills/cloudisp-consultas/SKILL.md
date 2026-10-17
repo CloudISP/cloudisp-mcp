@@ -42,7 +42,7 @@ herramientas no modifican nada: no hace falta confirmación.
 
 ## Técnicos — `find_technician`
 
-- Buscá por fragmento de nombre. Devolvé `employee_id` y nombre.
+- Buscá por fragmento de nombre. La lista trae solo quienes `assign_work_order` acepta. Devolvé `employee_id`, nombre y `role`.
 - Sin resultados: decí que no hay un técnico activo con ese nombre; no inventes.
 
 ## Red — ONUs, OLTs, routers, reportes

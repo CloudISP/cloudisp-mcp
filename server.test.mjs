@@ -479,7 +479,12 @@ test('list_plans, list_invoices, find_work_orders, get_work_order and find_techn
     assert.deepEqual(sig((await run('get_work_order', { work_order_id: 7 }, routes)).calls), ['GET /work-orders/7']);
 
     const technician = await run('find_technician', { query: 'Olivera' }, routes);
-    assert.equal(technician.calls[0].query.get('q'), 'Olivera');
+    assert.deepEqual(Object.fromEntries(technician.calls[0].query), { q: 'Olivera', assignable: '1' });
+
+    const withRole = await run('find_technician', { query: 'Olivera' }, {
+        'GET /employees': jsonResponse({ success: true, data: [{ id: 5, name: 'X', role: 'technical' }], meta: { total: 1 } }),
+    });
+    assert.equal(withRole.result.data[0].role, 'technical');
 });
 
 // ─── write tools ─────────────────────────────────────────────────────────────
@@ -1073,7 +1078,7 @@ test('initialize hands over the condensed core rules, cloudisp_context first', a
 
     const { instructions, serverInfo } = decodeMessages(Buffer.from(written.join(''), 'utf8'))[0].result;
 
-    assert.equal(serverInfo.version, '0.5.2');
+    assert.equal(serverInfo.version, '0.5.3');
     assert.ok(instructions.startsWith('Llamá cloudisp_context al iniciar cada conversación y antes de delegar'));
     assert.equal(instructions.split('\n').length, 6);
 });
@@ -1331,7 +1336,7 @@ test('stdio smoke: newline framing answers initialize and lists every tool with 
     const initialize = messages.find((message) => message.id === 1);
     assert.equal(initialize.result.protocolVersion, '2025-06-18');
     assert.equal(initialize.result.serverInfo.name, 'cloudisp-mcp');
-    assert.equal(initialize.result.serverInfo.version, '0.5.2');
+    assert.equal(initialize.result.serverInfo.version, '0.5.3');
     assert.match(initialize.result.instructions, /CLOUDISP_ALLOW_WRITES=1/);
     assert.ok(initialize.result.capabilities.tools);
 
