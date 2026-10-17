@@ -34,7 +34,11 @@ informá solo lo que devuelve:
   peor RX en dBm); `olt_read` con `olt.health_check` para una lectura en vivo.
 - **Routers MikroTik** — `list_routers` (salud) y `router_read` con
   `routeros.health_check`, `routeros.test_command` (`command`: `/system/identity/print`, `/system/resource/print`, `/interface/print` o `/ip/address/print`) o `routeros.interface_monitor_traffic`.
-- **Alertas** — `network_alerts`.
+- **Alertas** — `network_alerts` (por defecto solo las activas: abiertas o
+  reconocidas; `status` `closed` o `all` para el historial; filtros `severity`,
+  `type`, `olt_id`, `device_id`, `since`, `until`) y `get_alert` con el `id` de la
+  fila (evidencia, transiciones, quién la reconoció o cerró y de qué trata). Más
+  detalle en `cloudisp-red`.
 - **Métricas** — `device_metrics` (`kind`: `routeros` u `olt`, `device_id`): sin
   `metric_ids` devuelve el catálogo (con `search`, `selected`, `limit`… para acotarlo);
   con `metric_ids`, las series. Los ids son opacos (64 caracteres hexadecimales)

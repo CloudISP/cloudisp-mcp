@@ -55,7 +55,13 @@ logs → OTs abiertas.
        (la alerta de PON u OLT que lo afecta), después `olt_read` con
        `olt.health_check` y `network_alerts`, y **escalá sin tocar al abonado**.
      - **Cae solo ella** → ofrecé una OT de visita técnica.
-   - Online con **RX menor a −27 dBm** → problema óptico: ofrecé OT de visita.
+   - Online con RX en banda **critical** (menor a −28 dBm) → problema óptico:
+     ofrecé OT de visita. En banda **warning** (de −25 a −28 dBm) la señal está
+     degradada y puede causar lentitud o microcortes: decilo y ofrecé la OT si el
+     abonado tiene esos síntomas. `list_onus` del abonado (`client_id`) ya trae
+     `optical.band` con estas bandas del admin (`ok` desde −25 dBm); si el RX sale
+     del diagnóstico, aplicá los mismos umbrales. `optical` en `null` es "no
+     disponible", no señal buena.
    - Online con RX OK y sin PPPoE → `onu_diagnose` (sync solo lectura).
      - Si detecta un canal faltante o incorrecto → ofrecé `sync_onu`.
      - Si la ONU perdió su configuración (WAN o TR-069 ilegibles, por ejemplo

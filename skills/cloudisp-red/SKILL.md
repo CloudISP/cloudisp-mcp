@@ -1,6 +1,6 @@
 ---
 name: cloudisp-red
-description: "Depuración de red de solo lectura con el servidor MCP cloudisp: ONUs por modelo y firmware, ONUs offline, consumo de un abonado y ranking de uso por plataforma, OLT o PON, tráfico en vivo, estado y sondeos de OLTs, health checks de routers, masters EoC y tareas de equipo recientes. Usala para 'qué ONU tiene menos tráfico', 'listado de abonados con tal modelo o firmware', 'cuántas ONUs hay de tal modelo', 'cuánto consume el abonado', 'por qué falló la tarea', 'cómo está la OLT, el router o el master EoC'."
+description: "Depuración de red de solo lectura con el servidor MCP cloudisp: ONUs por modelo y firmware, ONUs offline, de qué abonado es una ONU por serial o MAC, señal óptica (RX), alertas activas y su detalle, consumo de un abonado y ranking de uso por plataforma, OLT o PON, tráfico en vivo, estado y sondeos de OLTs, health checks de routers, masters EoC y tareas de equipo recientes. Usala para 'qué ONU tiene menos tráfico', 'listado de abonados con tal modelo o firmware', 'de quién es la ONU con tal serial o MAC', 'qué señal tiene la ONU', 'qué alertas hay activas', 'cuántas ONUs hay de tal modelo', 'cuánto consume el abonado', 'por qué falló la tarea', 'cómo está la OLT, el router o el master EoC'."
 license: MIT
 compatibility: Requiere el servidor MCP cloudisp (https://github.com/CloudISP/cloudisp-mcp).
 ---
@@ -30,6 +30,17 @@ MB/GB y velocidades en Mbps (los `*_bps` dividen por 1.000.000).
   `wifi_channel_5`; `null` si la ONU no tiene datos del ACS) y `client` (`id`,
   `name`). `meta.total` es el total: con `per_page=1` solo contás; paginá con `page`
   (hasta 100 por página) para listar.
+- **De la etiqueta o el ticket al abonado:** `list_onus` con `serial` o `mac`
+  (exactos; el MAC vale con `:`, `-`, `.` o sin separadores) o con `serial_prefix`
+  (3 a 64 caracteres) / `mac_prefix` (4 a 12 dígitos hexadecimales) cuando solo se
+  conoce el comienzo. La fila dice el abonado (`client`), el PON y el estado de la
+  ONU. Sin resultados es "no hay una ONU con ese dato", no un error.
+- **Señal óptica:** cada fila de `list_onus` trae `optical` (`rx_dbm`, `band`,
+  `measured_at`, `measured_by`). `band` usa las bandas del admin: `ok` desde
+  −25 dBm, `warning` de −25 a −28 dBm (señal degradada: lentitud o microcortes) y
+  `critical` por debajo de −28 dBm. `optical` en `null` es **"no disponible"** (sin
+  lectura en los últimos 3 días): no es RX cero ni "señal buena". Solo hay RX: no
+  hay TX ni temperatura. Informá siempre la fecha `measured_at`.
 - "Abonados con ONU de tal tipo" (por ejemplo "WiFi 4"): partí de
   `list_onu_models`, elegí los modelos que correspondan **según lo que dice el
   dato** y listá cada uno con `list_onus`. No adivines qué modelo es de qué
@@ -65,9 +76,16 @@ MB/GB y velocidades en Mbps (los `*_bps` dividen por 1.000.000).
   `routeros.interface_monitor_traffic`.
 - **Masters EoC** (La Merced): `list_eoc_masters` (estado, último visto y CPEs
   contados). Solo lectura.
+- **Alertas:** `network_alerts` lista por defecto solo las **activas** (abiertas o
+  reconocidas, de la más nueva a la más vieja, con `meta.total`); con `status`
+  `closed` o `all` trae el historial y se acota con `severity`, `type`, `olt_id`,
+  `device_id` (el router) y `since` / `until`. Una alerta de OLT, PON u ONU trae
+  `device_id` en `null` (no tiene router). `get_alert` con el `id` de la fila da la
+  evidencia (métrica, valor, umbral), las transiciones, quién la reconoció o la
+  cerró (por nombre) y de qué trata: router, OLT, ONU con su RX y el abonado
+  (`client_id`; el nombre solo si la clave puede leer abonados).
 - **Telemetría y eventos:** `device_metrics` (catálogo y series de un router u
-  OLT), `network_alerts`, `platform_logs` (`platform_id` obligatorio, hasta 7
-  días).
+  OLT), `platform_logs` (`platform_id` obligatorio, hasta 7 días).
 
 ## Qué se intentó y por qué falló
 

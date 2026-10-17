@@ -42,6 +42,7 @@ Escribime en lenguaje natural; para un abonado usá su número, por ejemplo #123
 • **Listar los routers** — ejemplo: «Mostrame los routers»
 • **Consultar un router en vivo** — ejemplo: «Mirá las sesiones PPPoE de un router»
 • **Ver las alertas de red** — ejemplo: «¿Hay alertas de red activas?»
+• **Ver el detalle de una alerta** — ejemplo: «Mostrame el detalle de esa alerta de red»
 • **Ver métricas de un PON o un uplink** — ejemplo: «Mostrame el tráfico del uplink de una OLT en las últimas horas»
 • **Ver los logs de la plataforma** — ejemplo: «Mostrame los últimos logs de una OLT»
 • **Ver el estado general de la red** — ejemplo: «¿Cuántos abonados hay online ahora?»
