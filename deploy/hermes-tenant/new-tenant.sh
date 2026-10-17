@@ -133,6 +133,8 @@ cfg telegram.require_mention true
 cfg platforms.telegram.extra.command_menu.priority_mode replace
 cfg platforms.telegram.extra.command_menu.priority '[guia, new]'
 cfg platforms.telegram.extra.command_menu.max_commands 2
+# Sin avisos de reinicio/apagado del motor: hay varios usuarios y no deben recibir ruido cuando se actualiza el servidor.
+cfg platforms.telegram.gateway_restart_notification false
 # Lo que el prompt cuenta del equipo y del primer mensaje (el plugin limpia el resto).
 cfg agent.environment_probe false
 cfg onboarding.profile_build off
