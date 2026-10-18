@@ -243,6 +243,18 @@ Una tarea que terminó (`succeeded`) pero cuyo resultado trae `error` (por ejemp
 (`error` es `restart_not_observed` cuando el equipo nunca volvió del reinicio).
 Sigue sin ser un error de la herramienta (`isError: false`).
 
+Lo mismo vale para `outcome: "failed"` o `provisioned: false` del estado de la
+tarea (campos `outcome`, `reason`, `provisioned`, `verification.pppoe_user_on_onu`,
+`verification.credentials_pushed`, `verification.ppp_session_up`): vuelve como
+`device_error` con `error` = `reason` (o `not_provisioned`).
+
+`sync_onu` y `swap_onu` **nunca rotan la contraseña PPPoE**
+por su cuenta: solo envían `rotate_pppoe_password: true` cuando el operador lo
+confirmó explícitamente. Si la contraseña guardada es inválida la API responde
+409 `pppoe_pass_invalid` (outcome del mismo nombre, con instrucción de pedir la
+confirmación). Si la respuesta de despacho trae `credential_rotated: true`, se
+copia al resultado para avisar al operador.
+
 **Horas.** La API habla en UTC. Antes de entregarlas al agente, toda cadena que
 sea una fecha (ISO 8601 con zona, o `YYYY-MM-DD HH:MM:SS` sin zona, que es UTC) se
 convierte a `America/Argentina/Salta` con `-03:00`

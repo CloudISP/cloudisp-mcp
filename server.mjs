@@ -982,7 +982,14 @@ async function awaitDispatched(fetchImpl, clock, response, timeoutMs) {
     const task = await awaitTask(fetchImpl, taskRunId, timeoutMs === undefined ? clock : { ...clock, timeoutMs });
     const replayed = body.replayed ?? body.data?.replayed;
 
-    return replayed === undefined ? task : { ...task, replayed };
+    const extra = { ...(replayed === undefined ? {} : { replayed }) };
+    const rotated = body.credential_rotated ?? body.data?.credential_rotated;
+
+    if (rotated !== undefined) {
+        extra.credential_rotated = rotated;
+    }
+
+    return { ...task, ...extra };
 }
 
 // ─── Read handlers ───────────────────────────────────────────────────────────
@@ -2061,8 +2068,18 @@ async function changeWifiRadio(args, fetchImpl, clock) {
     return onuAction(fetchImpl, clock, subscriberId, idempotencyKey, 'onu.wifi_radio_update', parameters);
 }
 
+/**
+ * `rotate_pppoe_password` body: sent only when the operator explicitly asked (`true`); never implicit.
+ *
+ * @param {object} args Tool arguments.
+ * @return {object} `{ rotate_pppoe_password: true }` or `{}`.
+ */
+function rotateBody(args) {
+    return args.rotate_pppoe_password === true ? { rotate_pppoe_password: true } : {};
+}
+
 /** `sync_onu` — `POST /subscribers/{id}/onu/sync`, then waits for the task. */
-const syncOnu = subscriberWrite('/onu/sync', LONG_TASK_TIMEOUT_MS);
+const syncOnu = subscriberWrite('/onu/sync', LONG_TASK_TIMEOUT_MS, rotateBody);
 
 /**
  * `change_subscriber_plan` — `POST /subscribers/{id}/plan`.
@@ -2228,6 +2245,10 @@ function swapBody(args) {
 
     if (typeof args.keep_password === 'boolean') {
         body.keep_password = args.keep_password;
+    }
+
+    if (args.rotate_pppoe_password === true) {
+        body.rotate_pppoe_password = true;
     }
 
     return body;
@@ -2998,8 +3019,13 @@ const TOOLS = [
         'sync_onu',
         'Sincronizar ONU',
         'Sync (re-provision) the subscriber\'s linked ONU with its expected configuration. Run onu_diagnose first and offer this only when it detects a missing or wrong '
-        + 'channel. Waits up to 110 s and returns the task projection; sync_template_missing means the model is not adapted.',
-        SUBSCRIBER_PROPERTIES,
+        + 'channel. Waits up to 110 s and returns the task projection; sync_template_missing means the model is not adapted. '
+        + 'NEVER report success from the dispatch alone: it succeeded only when the answer has no outcome (a device_error/task_failed outcome, provisioned false or outcome failed means it FAILED: say so with the reason; check verification.pppoe_user_on_onu, credentials_pushed and ppp_session_up). '
+        + 'It never rotates the PPPoE password by itself: pppoe_pass_invalid means the stored password is invalid; ask the operator to confirm rotation before retrying with rotate_pppoe_password true. If the answer has credential_rotated true, tell the operator the PPPoE password changed.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            rotate_pppoe_password: { type: 'boolean', description: 'DANGEROUS: changes the subscriber\'s PPPoE password. Set true ONLY after the operator explicitly confirmed it (e.g. after a pppoe_pass_invalid refusal); never by default.' },
+        },
         [],
         syncOnu,
     ),
@@ -3161,7 +3187,8 @@ const TOOLS = [
         'reprovision_onu',
         'Reaprovisionar ONU',
         'Re-provision the subscriber\'s linked ONU (onu.provision, mode reprovision): replays the desired PPPoE WAN, management WAN, TR-069 client, WiFi and CATV onto it, '
-        + 'e.g. after a factory reset. The subscriber may lose service briefly. Waits up to 110 s and returns the task projection.',
+        + 'e.g. after a factory reset. The subscriber may lose service briefly. Waits up to 110 s and returns the task projection; a device_error outcome or provisioned false means it FAILED (report the reason). '
+        + 'It never changes the PPPoE password; verification.credentials_pushed says whether the ONU received it.',
         SUBSCRIBER_PROPERTIES,
         [],
         reprovisionOnu,
@@ -3204,6 +3231,7 @@ const TOOLS = [
             ssid_5: { type: 'string', description: 'Optional 5 GHz network name for the new ONU.' },
             wifi_password: { type: 'string', description: 'Optional new WiFi password; never echoed.' },
             keep_password: { type: 'boolean', description: 'Keep the WiFi password CloudISP has on record for the subscriber.' },
+            rotate_pppoe_password: { type: 'boolean', description: 'DANGEROUS: changes the subscriber\'s PPPoE password. Set true ONLY after the operator explicitly confirmed it (e.g. after a pppoe_pass_invalid refusal); never by default.' },
         },
         ['network_onu_id', 'serial', 'mac'],
         swapOnu,
@@ -3340,7 +3368,8 @@ const OUTCOME_HINTS = {
     validation_failed: 'Argumentos inválidos: corregilos o preguntale al usuario; no repitas la misma llamada.',
     wifi_read_pending: 'La lectura no terminó y no se escribió nada; consultá get_task más tarde.',
     task_failed: 'La tarea falló en el equipo: informá el motivo y ofrecé la alternativa (reinicio u OT); no reintentes solo.',
-    device_error: 'La tarea terminó pero el equipo no hizo lo pedido (ver error): informá el motivo y ofrecé la alternativa (reinicio u OT de visita); no reintentes solo.',
+    device_error: 'La tarea terminó pero el equipo NO quedó como se pidió (ver error/reason): decí que FALLÓ y el motivo, nunca "sincronizado"; ofrecé la alternativa (reinicio u OT de visita); no reintentes solo.',
+    pppoe_pass_invalid: 'La contraseña PPPoE guardada del abonado no es válida y NO se tocó nada. Pedile al operador que confirme explícitamente rotarla (cambia la contraseña PPPoE del abonado) o que la corrija; solo con su confirmación repetí la llamada con rotate_pppoe_password true.',
 };
 
 /**
@@ -3385,6 +3414,11 @@ function deviceFailure(task) {
 
     if (error !== undefined && error !== null && error !== '' && error !== false) {
         return typeof error === 'string' ? error : 'device_error';
+    }
+
+    // Admin's normalized outcome (and `provisioned: false`) wins over a bare `status: succeeded`.
+    if (task.outcome === 'failed' || task.result.outcome === 'failed' || task.result.provisioned === false || task.provisioned === false) {
+        return task.reason ?? task.result.reason ?? 'not_provisioned';
     }
 
     return restartObserved === false ? 'restart_not_observed' : null;
@@ -3433,6 +3467,8 @@ function classifyOutcome(result) {
         return outcomeResult('device_error', result.message, result.result, {
             error: deviceError,
             task_run_id: result.task_run_id ?? null,
+            ...(result.reason === undefined ? {} : { reason: result.reason }),
+            ...(result.credential_rotated === undefined ? {} : { credential_rotated: result.credential_rotated }),
             ...(result.replayed === undefined ? {} : { replayed: result.replayed }),
         });
     }
