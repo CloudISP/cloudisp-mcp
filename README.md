@@ -248,7 +248,7 @@ tarea (campos `outcome`, `reason`, `provisioned`, `verification.pppoe_user_on_on
 `verification.credentials_pushed`, `verification.ppp_session_up`): vuelve como
 `device_error` con `error` = `reason` (o `not_provisioned`).
 
-`sync_onu`, `reprovision_onu` y `swap_onu` **nunca rotan la contraseña PPPoE**
+`sync_onu` y `swap_onu` **nunca rotan la contraseña PPPoE**
 por su cuenta: solo envían `rotate_pppoe_password: true` cuando el operador lo
 confirmó explícitamente. Si la contraseña guardada es inválida la API responde
 409 `pppoe_pass_invalid` (outcome del mismo nombre, con instrucción de pedir la

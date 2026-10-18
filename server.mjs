@@ -2317,7 +2317,7 @@ const optimizeWifi = onuActionHandler('onu.wifi_optimize', undefined, wifiOptimi
 const restoreWifi = onuActionHandler('onu.wifi_restore');
 
 /** `reprovision_onu` — `POST /subscribers/{id}/onu/provision` (mode reprovision). */
-const reprovisionOnu = subscriberWrite('/onu/provision', LONG_TASK_TIMEOUT_MS, rotateBody);
+const reprovisionOnu = subscriberWrite('/onu/provision', LONG_TASK_TIMEOUT_MS);
 
 /** `kick_pppoe` — `POST /subscribers/{id}/pppoe/kick`; answers synchronously. */
 const kickPppoe = subscriberWrite('/pppoe/kick');
@@ -3188,11 +3188,8 @@ const TOOLS = [
         'Reaprovisionar ONU',
         'Re-provision the subscriber\'s linked ONU (onu.provision, mode reprovision): replays the desired PPPoE WAN, management WAN, TR-069 client, WiFi and CATV onto it, '
         + 'e.g. after a factory reset. The subscriber may lose service briefly. Waits up to 110 s and returns the task projection; a device_error outcome or provisioned false means it FAILED (report the reason). '
-        + 'It never rotates the PPPoE password unless the operator explicitly confirmed it (rotate_pppoe_password true); pppoe_pass_invalid means ask for that confirmation. credential_rotated true: tell the operator the password changed.',
-        {
-            ...SUBSCRIBER_PROPERTIES,
-            rotate_pppoe_password: { type: 'boolean', description: 'DANGEROUS: changes the subscriber\'s PPPoE password. Set true ONLY after the operator explicitly confirmed it (e.g. after a pppoe_pass_invalid refusal); never by default.' },
-        },
+        + 'It never changes the PPPoE password; verification.credentials_pushed says whether the ONU received it.',
+        SUBSCRIBER_PROPERTIES,
         [],
         reprovisionOnu,
     ),
