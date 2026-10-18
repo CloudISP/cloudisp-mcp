@@ -753,6 +753,62 @@ test('sync_onu posts to /onu/sync with the idempotency key and awaits the task',
     assert.equal(result.task_run_id, 30);
 });
 
+test('sync_onu sends no rotate flag unless the operator set it, and passes it through when set', async () => {
+    const routes = { 'POST /subscribers/42/onu/sync': accepted(31), 'GET /tasks/31': jsonResponse(taskProjection(31, 'succeeded')) };
+    const plain = await run('sync_onu', { ...WRITE_ARGS, subscriber_id: 42 }, routes);
+    const falsy = await run('sync_onu', { ...WRITE_ARGS, subscriber_id: 42, rotate_pppoe_password: false }, routes);
+    const rotate = await run('sync_onu', { ...WRITE_ARGS, subscriber_id: 42, rotate_pppoe_password: true }, routes);
+
+    assert.deepEqual(plain.calls[0].body, {});
+    assert.deepEqual(falsy.calls[0].body, {});
+    assert.deepEqual(rotate.calls[0].body, { rotate_pppoe_password: true });
+});
+
+test('sync_onu reports a succeeded task with outcome failed / provisioned false as a failure with its reason', async () => {
+    const failed = await run('sync_onu', { ...WRITE_ARGS, subscriber_id: 42 }, {
+        'POST /subscribers/42/onu/sync': accepted(32, { credential_rotated: true }),
+        'GET /tasks/32': jsonResponse({
+            ...taskProjection(32, 'succeeded', { provisioned: false, verification: { credentials_pushed: false, ppp_session_up: false } }),
+            outcome: 'failed', reason: 'repair_verify_failed',
+        }),
+    });
+
+    assert.equal(failed.result.ok, false);
+    assert.equal(failed.result.outcome, 'device_error');
+    assert.equal(failed.result.error, 'repair_verify_failed');
+    assert.equal(failed.result.reason, 'repair_verify_failed');
+    assert.equal(failed.result.credential_rotated, true);
+    assert.equal(failed.result.details.verification.ppp_session_up, false);
+
+    const bare = await run('sync_onu', { ...WRITE_ARGS, subscriber_id: 42 }, {
+        'POST /subscribers/42/onu/sync': accepted(33),
+        'GET /tasks/33': jsonResponse(taskProjection(33, 'succeeded', { provisioned: false })),
+    });
+    assert.equal(bare.result.outcome, 'device_error');
+    assert.equal(bare.result.error, 'not_provisioned');
+});
+
+test('sync_onu surfaces credential_rotated on success, and a provisioned task is not a failure', async () => {
+    const { result } = await run('sync_onu', { ...WRITE_ARGS, subscriber_id: 42, rotate_pppoe_password: true }, {
+        'POST /subscribers/42/onu/sync': accepted(34, { credential_rotated: true }),
+        'GET /tasks/34': jsonResponse({ ...taskProjection(34, 'succeeded', { provisioned: true }), outcome: 'success' }),
+    });
+
+    assert.equal(result.outcome, 'success');
+    assert.equal(result.credential_rotated, true);
+});
+
+test('a 409 pppoe_pass_invalid is an outcome that tells to confirm the rotation first', async () => {
+    const { result } = await run('sync_onu', { ...WRITE_ARGS, subscriber_id: 42 }, {
+        'POST /subscribers/42/onu/sync': errorResponse(409, { code: 'pppoe_pass_invalid', message: 'La contraseña PPPoE no es válida.' }),
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, 'pppoe_pass_invalid');
+    assert.match(result.hint, /confirme/);
+    assert.match(result.hint, /rotate_pppoe_password true/);
+});
+
 test('change_subscriber_plan posts plan_id to /plan', async () => {
     const { calls } = await run('change_subscriber_plan', { ...WRITE_ARGS, subscriber_id: 42, plan_id: 8 }, {
         'POST /subscribers/42/plan': jsonResponse({ success: true, data: { id: 42, plan_id: 8 } }),

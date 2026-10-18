@@ -66,6 +66,16 @@ logs → OTs abiertas.
      - Si detecta un canal faltante o incorrecto → ofrecé `sync_onu`.
      - Si la ONU perdió su configuración (WAN o TR-069 ilegibles, por ejemplo
        tras un restablecimiento) → ofrecé `reprovision_onu`.
+     - `sync_onu` no es éxito por haberse despachado: si vuelve `outcome`
+       (`device_error`, `task_failed`) o `provisioned: false`, **falló**; decilo
+       con el motivo (`reason`/`error`), nunca "sincronizado". Si el abonado
+       sigue con Access-Reject (sin PPPoE) tras un sync, probablemente la
+       contraseña PPPoE de la ONU y la de RADIUS divergieron
+       (`verification.credentials_pushed: false` o `ppp_session_up: false`):
+       **no repitas el sync**, escalá. Nunca uses `rotate_pppoe_password: true`
+       sin confirmación explícita del operador (cambia la contraseña PPPoE del
+       abonado); con `pppoe_pass_invalid` pedí esa confirmación. Si vuelve
+       `credential_rotated: true`, avisale al operador que la contraseña cambió.
      - Si responde `sync_template_missing` → **"modelo no adaptado"**: ofrecé
        reinicio (`reboot_onu`) y, si falla, la OT.
 5. **Si sigue sin resolverse:** `device_tasks` con el abonado (qué se intentó en
