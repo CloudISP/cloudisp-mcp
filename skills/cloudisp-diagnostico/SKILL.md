@@ -69,13 +69,25 @@ logs → OTs abiertas.
      - `sync_onu` no es éxito por haberse despachado: si vuelve `outcome`
        (`device_error`, `task_failed`) o `provisioned: false`, **falló**; decilo
        con el motivo (`reason`/`error`), nunca "sincronizado". Si el abonado
-       sigue con Access-Reject (sin PPPoE) tras un sync, probablemente la
-       contraseña PPPoE de la ONU y la de RADIUS divergieron
-       (`verification.credentials_pushed: false` o `ppp_session_up: false`):
-       **no repitas el sync**, escalá. Nunca uses `rotate_pppoe_password: true`
-       sin confirmación explícita del operador (cambia la contraseña PPPoE del
-       abonado); con `pppoe_pass_invalid` pedí esa confirmación. Si vuelve
-       `credential_rotated: true`, avisale al operador que la contraseña cambió.
+       sigue con Access-Reject (sin PPPoE) y la ONU está online, la contraseña
+       PPPoE de la ONU y la de RADIUS probablemente divergieron: un `sync_onu`
+       es la reparación (vuelve a escribir usuario y contraseña en la ONU).
+       Hacelo **una sola vez**; si vuelve `verification.credentials_pushed:
+       false` o `ppp_session_up: false`, **no lo repitas**, escalá. Nunca uses
+       `rotate_pppoe_password: true` sin confirmación explícita del operador
+       (cambia la contraseña PPPoE del abonado); con `pppoe_pass_invalid` pedí
+       esa confirmación. Si vuelve `credential_rotated: true`, avisale al
+       operador que la contraseña cambió.
+     - `diagnose_subscriber` trae `credentials_apply` cuando la contraseña PPPoE
+       cambió hace poco: CloudISP la aplica sola en la ONU.
+       - `status` `pending` o `dispatched` → se está aplicando: esperá, no
+         sincronices.
+       - `outcome` `applied` → aplicada. `applied_unverified` → aplicada sin
+         poder medir la sesión. `not_applicable` → la ONU no marca PPPoE (la
+         marca el router del cliente): avisá que hay que cargarla ahí.
+       - `outcome` `restored` → la ONU no la aceptó y se restauró la anterior;
+         decíselo al operador con la causa (`cause`).
+       - `not_confirmed` o `restore_failed` → escalá con `cause`.
      - Si responde `sync_template_missing` → **"modelo no adaptado"**: ofrecé
        reinicio (`reboot_onu`) y, si falla, la OT.
 5. **Si sigue sin resolverse:** `device_tasks` con el abonado (qué se intentó en
