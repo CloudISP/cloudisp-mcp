@@ -2450,7 +2450,9 @@ const TOOLS = [
         + 'billing (open_cutoff, overdue_invoices, debt_by_currency [{currency, debt_cents, overdue_cents}] -- one row per currency, ARS and USD are never added together --, oldest_due_date and '
         + 'last_payment {amount_cents, currency, method, origin, received_at}, null while the subscriber never paid), problems (the open or acknowledged alerts that name the subscriber, its ONU, its PON port or its OLT, like the admin '
         + '\'active problems\' card), onu (state and last optical reading with the last 12 samples and their min/avg/max), network_context (PPPoE session, last 24 h; PON and uplink traffic come as summarised series '
-        + '{state, series: [{name, unit, last, min, avg, max, last_at, points}]}), consumption (at most 5 recent entries; use subscriber_usage for bytes), activity and open work orders. '
+        + '{state, series: [{name, unit, last, min, avg, max, last_at, points}]}), consumption (at most 5 recent entries; use subscriber_usage for bytes), activity and open work orders, '
+        + 'and credentials_apply (null, or the last automatic application of a changed PPPoE password to the ONU: {status, outcome, attempts, cause, requested_at, finished_at}; '
+        + 'status pending/dispatched = still applying, do not sync; outcome restored = the ONU refused it and the previous password was restored; not_confirmed/restore_failed = escalate with cause). '
         + 'A section that cannot be built is null and listed in section_errors; null means "no disponible", never 0.',
         SUBSCRIBER_PROPERTIES,
         diagnoseSubscriber,
@@ -3021,7 +3023,8 @@ const TOOLS = [
         'Sync (re-provision) the subscriber\'s linked ONU with its expected configuration. Run onu_diagnose first and offer this only when it detects a missing or wrong '
         + 'channel. Waits up to 110 s and returns the task projection; sync_template_missing means the model is not adapted. '
         + 'NEVER report success from the dispatch alone: it succeeded only when the answer has no outcome (a device_error/task_failed outcome, provisioned false or outcome failed means it FAILED: say so with the reason; check verification.pppoe_user_on_onu, credentials_pushed and ppp_session_up). '
-        + 'It never rotates the PPPoE password by itself: pppoe_pass_invalid means the stored password is invalid; ask the operator to confirm rotation before retrying with rotate_pppoe_password true. If the answer has credential_rotated true, tell the operator the PPPoE password changed.',
+        + 'It never rotates the PPPoE password by itself: pppoe_pass_invalid means the stored password is invalid; ask the operator to confirm rotation before retrying with rotate_pppoe_password true. If the answer has credential_rotated true, tell the operator the PPPoE password changed. '
+        + 'This sync rewrites the PPPoE credentials on an ONU that is online without a session, so it is the fix for a subscriber stuck on Access-Reject: run it once; if credentials_pushed or ppp_session_up comes back false, do not repeat it, escalate.',
         {
             ...SUBSCRIBER_PROPERTIES,
             rotate_pppoe_password: { type: 'boolean', description: 'DANGEROUS: changes the subscriber\'s PPPoE password. Set true ONLY after the operator explicitly confirmed it (e.g. after a pppoe_pass_invalid refusal); never by default.' },
