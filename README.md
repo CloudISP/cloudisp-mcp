@@ -46,7 +46,8 @@ scopes de **solo lectura** (`:read`). Las herramientas nuevas piden además
 `audit:read` (historial del abonado); las de escritura piden `devices:operate`,
 `subscribers:write`, `billing:write` (cobros y modalidad de facturación),
 `work-orders:write` y `work-orders:assign`, y un empleado responsable asociado a
-la clave. Cada plataforma hija tiene además una **política** (`read` o
+la clave (con `actor:delegate`, el empleado de quien habla; ver
+[Identidad del operador](#identidad-del-operador)). Cada plataforma hija tiene además una **política** (`read` o
 `technician`, con tope diario de escrituras) que el admin aplica del lado del
 servidor. Pedila a [contacto@digitalnoa.com.ar](mailto:contacto@digitalnoa.com.ar).
 
@@ -345,6 +346,7 @@ API (lecturas, polling y escrituras) llevan:
 | `X-CloudISP-Channel` | `telegram`, `cli` o `api` (otro canal no se envía) |
 | `X-CloudISP-Conversation` | referencia de la conversación, hasta 128 caracteres imprimibles (el plugin de Hermes manda el id de sesión del agente, que cambia con `/new`) |
 | `X-CloudISP-Tool` | nombre de la herramienta |
+| `X-CloudISP-On-Behalf-Of` | `telegram:<id numérico>`: sólo si el operador habla por Telegram con un id numérico (mismo valor que `X-CloudISP-Operator-Id`) |
 
 El admin los guarda en `api_request_log` y en `safe_facts.agent` de cada cambio.
 Con `CLOUDISP_REQUIRE_OPERATOR=1` una escritura sin `_operator` válido vuelve como
@@ -353,6 +355,15 @@ sin tocar la API (el admin hace lo mismo con `422 operator_required` para las
 claves con `requires_operator`). Un CLI sin plugin no tiene `_operator`: dejá
 `CLOUDISP_REQUIRE_OPERATOR` sin definir y las escrituras salen solo con el header
 de la herramienta.
+
+**Actuar como quien habla.** `X-CloudISP-On-Behalf-Of` viaja en **cada** pedido de la llamada (lecturas incluidas): el admin, para una clave con el scope
+`actor:delegate`, usa como actor al empleado asociado a ese usuario de Telegram en lugar del empleado fijo de la clave, y falla cerrado (no actúa) si ninguno
+lo está. Con otros canales (`cli`) o un id que no es numérico no se envía y la clave actúa con su empleado fijo.
+
+*Límite de confianza.* El MCP no puede distinguir quién escribió `_operator`: en un bot lo **pisa** el plugin de Hermes en cada llamada con el usuario
+de la sesión (`HERMES_SESSION_USER_ID` y `HERMES_SESSION_PLATFORM`; un `_operator` del modelo nunca sobrevive y, si no hay usuario, se manda `null`), y
+`CLOUDISP_REQUIRE_OPERATOR=1` frena las escrituras sin identidad. Un cliente sin ese plugin (Claude Code, omp…) deja el `_operator` en manos del modelo:
+**una clave con `actor:delegate` sólo debe correr detrás del plugin**.
 
 ### Archivos: informes y gráficos
 

@@ -3084,3 +3084,66 @@ test('a human_only refusal of the API is an expected outcome with its own hint, 
         assert.equal(hidden.find((tool) => tool.name === name).annotations.readOnlyHint, true, name);
     }
 });
+
+// ─── v0.7.0: acting as the Telegram user who speaks ──────────────────────────
+
+test('a Telegram speaker with a numeric id is sent as X-CloudISP-On-Behalf-Of on every request of the call, reads included', async () => {
+    const write = await run('record_payment', { ...WRITE_ARGS, subscriber_query: 'Perez', amount: 100, method: 'cash' }, {
+        'GET /subscribers': ONE_SUBSCRIBER,
+        'POST /subscribers/42/payments': jsonResponse({ success: true, data: { id: 1 } }, 201),
+    });
+    const read = await run('get_subscriber_billing', { subscriber_query: 'Perez', _operator: OPERATOR }, {
+        'GET /subscribers': ONE_SUBSCRIBER,
+        'GET /subscribers/42/billing': jsonResponse({ success: true, data: {} }),
+    });
+    const context = await run('cloudisp_context', { _operator: OPERATOR }, { 'GET /agent/context': jsonResponse({ success: true, data: {} }) });
+
+    assert.deepEqual([write.calls.length, read.calls.length, context.calls.length], [2, 2, 1]);
+
+    for (const call of [...write.calls, ...read.calls, ...context.calls]) {
+        assert.equal(call.headers['X-CloudISP-On-Behalf-Of'], 'telegram:941533777', `${call.method} ${call.path}`);
+        assert.equal(call.headers['X-CloudISP-On-Behalf-Of'], call.headers['X-CloudISP-Operator-Id'], 'the same speaker the audit trail names');
+    }
+});
+
+test('X-CloudISP-On-Behalf-Of is not sent without a numeric Telegram id: other channels, ids that name no Telegram user, no operator', async () => {
+    const routes = { 'GET /subscribers': ONE_SUBSCRIBER };
+
+    for (const _operator of [
+        { ...OPERATOR, channel: 'cli' },
+        { ...OPERATOR, channel: 'api' },
+        { ...OPERATOR, channel: 'matrix' },
+        { ...OPERATOR, id: 'marcos' },
+        { ...OPERATOR, id: '9'.repeat(21) },
+        { ...OPERATOR, id: '94.15' },
+        null,
+        undefined,
+    ]) {
+        const { calls } = await run('find_subscriber', { query: 'Perez', _operator }, routes);
+
+        assert.equal(calls[0].headers['X-CloudISP-On-Behalf-Of'], undefined, JSON.stringify(_operator));
+    }
+
+    const numeric = await run('find_subscriber', { query: 'Perez', _operator: { ...OPERATOR, id: 941533777 } }, routes);
+
+    assert.equal(numeric.calls[0].headers['X-CloudISP-On-Behalf-Of'], 'telegram:941533777', 'a numeric id is accepted as number or string');
+});
+
+test('the model cannot name the speaker through a tool argument: only the hidden _operator counts, and no schema offers another way', async () => {
+    const forged = { on_behalf_of: 'telegram:1', _speaker: 'telegram:1', onBehalfOf: 'telegram:1', 'X-CloudISP-On-Behalf-Of': 'telegram:1', headers: { 'X-CloudISP-On-Behalf-Of': 'telegram:1' } };
+    const anonymous = await run('find_subscriber', { query: 'Perez', ...forged }, { 'GET /subscribers': ONE_SUBSCRIBER });
+    const known = await run('find_subscriber', { query: 'Perez', ...forged, _operator: OPERATOR }, { 'GET /subscribers': ONE_SUBSCRIBER });
+
+    assert.equal(anonymous.calls[0].headers['X-CloudISP-On-Behalf-Of'], undefined);
+    assert.equal(known.calls[0].headers['X-CloudISP-On-Behalf-Of'], 'telegram:941533777', 'the operator of the session wins');
+
+    for (const call of [anonymous.calls[0], known.calls[0]]) {
+        assert.deepEqual([...call.query.keys()], ['q'], 'nothing of the forged arguments reaches the query string');
+    }
+
+    for (const tool of listTools(WRITES_ON)) {
+        const names = Object.keys(tool.inputSchema.properties ?? {}).map((name) => name.toLowerCase());
+
+        assert.equal(names.some((name) => name.includes('operator') || name.includes('speaker') || name.includes('behalf')), false, tool.name);
+    }
+});

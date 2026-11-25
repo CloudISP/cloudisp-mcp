@@ -44,6 +44,12 @@ const REQUESTED_BY_HEADER = 'X-CloudISP-Requested-By';
 const CHANNEL_HEADER = 'X-CloudISP-Channel';
 const CONVERSATION_HEADER = 'X-CloudISP-Conversation';
 const TOOL_HEADER = 'X-CloudISP-Tool';
+
+/**
+ * The Telegram user the call is made for (`telegram:<numeric id>`): the admin, for a key with `actor:delegate`, acts as the
+ * employee mapped to that id instead of the key's fixed actor, and refuses the request when no employee is mapped.
+ */
+const ON_BEHALF_OF_HEADER = 'X-CloudISP-On-Behalf-Of';
 const REQUESTED_BY_MAX_LENGTH = 120;
 const CONVERSATION_MAX_LENGTH = 128;
 
@@ -354,6 +360,11 @@ function identityHeaders(tool, operator) {
 
         if (OPERATOR_CHANNELS.includes(operator.channel)) {
             headers[CHANNEL_HEADER] = operator.channel;
+        }
+
+        // Only a numeric Telegram user id names an employee; the operator comes from the agent plugin, never from the model (see README, "Identidad del operador").
+        if (/^telegram:[0-9]{1,20}$/.test(operator.ref)) {
+            headers[ON_BEHALF_OF_HEADER] = operator.ref;
         }
 
         if (operator.conversation !== '') {
