@@ -18,5 +18,10 @@
   "reprovision_onu": "Reaprovisionar la ONU",
   "kick_pppoe": "Cerrar la sesión de conexión (PPPoE)",
   "locate_new_onu": "Ubicar una ONU nueva por MAC",
-  "swap_onu": "Cambiar la ONU de un abonado"
+  "swap_onu": "Cambiar la ONU de un abonado",
+  "record_payment": "Registrar un pago",
+  "set_billing_modality": "Cambiar la modalidad de facturación",
+  "set_price_override": "Fijar un precio especial",
+  "set_cutoff_override": "Mover la fecha de corte",
+  "update_subscriber_contact": "Actualizar los datos de contacto"
 }

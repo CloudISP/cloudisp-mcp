@@ -42,8 +42,9 @@ registrar sin duplicar nada; tu archivo `.env` no se toca.
 
 Las claves las emite CloudISP para tu plataforma. Por defecto se entregan con
 scopes de **solo lectura** (`:read`). Las herramientas nuevas piden además
-`devices:read` (lecturas de equipos y tareas), `reports:read` y `knowledge:read`;
-las de escritura piden `devices:operate`, `subscribers:write`,
+`devices:read` (lecturas de equipos y tareas), `reports:read`, `knowledge:read` y
+`audit:read` (historial del abonado); las de escritura piden `devices:operate`,
+`subscribers:write`, `billing:write` (cobros y modalidad de facturación),
 `work-orders:write` y `work-orders:assign`, y un empleado responsable asociado a
 la clave. Cada plataforma hija tiene además una **política** (`read` o
 `technician`, con tope diario de escrituras) que el admin aplica del lado del
@@ -161,6 +162,11 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `get_account_statement` | `GET /subscribers/{id}/account-statement` (deuda por moneda y asientos) | `invoices:read` | lectura |
 | `list_debtors` | `GET /collections/debtors` (`currency`: `ARS`, `USD`; `q`) | `invoices:read` | lectura |
 | `list_cutoffs` | `GET /collections/cutoffs` · `/subscribers/{id}/cutoffs` (`status`: `cut_off`, `active`; `history`) | `subscribers:read` | lectura |
+| `get_subscriber_billing` | `GET /subscribers/{id}/billing` (modalidad, precio, bonificaciones vigentes, prórroga de corte) | `invoices:read` | lectura |
+| `list_subscriber_payments` | `GET /subscribers/{id}/payments` (más nuevos primero; `limit` hasta 100) | `invoices:read` | lectura |
+| `get_subscriber_audit` | `GET /subscribers/{id}/audit` (historial del abonado; `limit` hasta 100, 50 por defecto) | `audit:read` | lectura |
+| `get_invoice_pdf` | `GET /invoices/{id}/pdf` (guarda el PDF y devuelve su línea `MEDIA:`) | `invoices:read` | lectura |
+| `get_payment_receipt` | `GET /payments/{id}/receipt` (guarda el PDF y devuelve su línea `MEDIA:`) | `invoices:read` | lectura |
 | `find_work_orders` · `get_work_order` | `GET /work-orders` (`status`, `type`, `priority`, `assigned_to`, `scheduled_from`/`scheduled_to`, `overdue`) · `/work-orders/{id}` (con `created_by` y el timeline: historial y comentarios) | `work-orders:read` | lectura |
 | `find_technician` | `GET /employees?q=&assignable=1` | `employees:read` | lectura |
 | `network_snapshot` | `GET /operations/snapshot` (`platform_id` opcional) | `operations:read` | lectura |
@@ -192,6 +198,11 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `kick_pppoe` | `POST /subscribers/{id}/pppoe/kick` | `devices:operate` | escritura, destructiva |
 | `locate_new_onu` | `POST /subscribers/{id}/onu/swap/locate` (`olt_id` opcional) + `GET /tasks/{id}` | `devices:operate` | escritura |
 | `swap_onu` | `POST /subscribers/{id}/onu/swap` | `devices:operate` | escritura |
+| `record_payment` | `POST /subscribers/{id}/payments` (`amount` en pesos, `method`: `cash`, `transfer`, `other`; devuelve el pago y su `receipt_number`) | `billing:write` | escritura |
+| `set_billing_modality` | `POST /subscribers/{id}/billing/modality` (`plan`, `dedicated_discount` o `no_cut`; **`no_billing` es sólo humano**: la herramienta lo rechaza con `human_only` y el servidor también) | `billing:write` | escritura |
+| `set_price_override` | `POST /subscribers/{id}/billing/price` (`price` en pesos, o `null` para volver al precio del plan) | `billing:write` | escritura |
+| `set_cutoff_override` | `POST /subscribers/{id}/billing/cutoff-override` (`date` del mes en curso y `reason`, o `null` para volver al día habitual) | `billing:write` | escritura |
+| `update_subscriber_contact` | `PATCH /subscribers/{id}/contact` (subconjunto de `phone`, `email`, `address`, `city`) | `subscribers:write` | escritura |
 
 Todas las herramientas que reciben un abonado aceptan `subscriber_id` o
 `subscriber_query`; con `subscriber_query` se exige **exactamente un** abonado

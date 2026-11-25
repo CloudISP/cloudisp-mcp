@@ -10,6 +10,11 @@ Escribime en lenguaje natural; para un abonado usá su número, por ejemplo #123
 • **Ver las facturas de un abonado** — ejemplo: «¿Tiene facturas vencidas el #1234?»
 • **Ver una factura y sus pagos** — ejemplo: «¿Qué pagos tiene la factura 918?»
 • **Ver la cuenta corriente de un abonado** — ejemplo: «Mostrame la cuenta corriente del #1234»
+• **Ver la facturación de un abonado** — ejemplo: «¿Cómo está facturado el #1234?»
+• **Ver los pagos de un abonado** — ejemplo: «¿Qué pagos hizo el #1234?»
+• **Ver el historial de cambios de un abonado** — ejemplo: «¿Qué cambios tuvo el #1234 este mes?»
+• **Descargar una factura en PDF** — ejemplo: «Pasame el PDF de la factura 918»
+• **Descargar el recibo de un pago** — ejemplo: «Pasame el recibo del último pago del #1234»
 • **Listar los deudores** — ejemplo: «¿Quiénes son los que más deben?»
 • **Ver los cortes por cobranza** — ejemplo: «¿Qué abonados tienen el servicio cortado por deuda?»
 • **Cambiar el plan de un abonado** ✍️ — ejemplo: «Pasá al #1234 a otro plan»
@@ -17,6 +22,11 @@ Escribime en lenguaje natural; para un abonado usá su número, por ejemplo #123
 • **Cortar el servicio de un abonado** ✍️ — ejemplo: «Desconectá al abonado #1234»
 • **Reconectar el servicio de un abonado** ✍️ — ejemplo: «Reconectá al abonado #1234»
 • **Cerrar la sesión de conexión (PPPoE)** ✍️ — ejemplo: «Cerrá la sesión PPPoE del #1234 para que se reconecte»
+• **Registrar un pago** ✍️ — ejemplo: «Cargale un pago de 12500 en efectivo al #1234»
+• **Cambiar la modalidad de facturación** ✍️ — ejemplo: «Dale una bonificación del 20% al #1234»
+• **Fijar un precio especial** ✍️ — ejemplo: «Ponele un precio de 18000 al #1234»
+• **Mover la fecha de corte** ✍️ — ejemplo: «Correle el corte al #1234 hasta el día 25»
+• **Actualizar los datos de contacto** ✍️ — ejemplo: «Cambiale la dirección al #1234»
 
 **ONU y WiFi**
 • **Leer el estado de la ONU y el WiFi** — ejemplo: «Leé el WiFi del #1234»

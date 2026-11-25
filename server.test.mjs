@@ -59,6 +59,7 @@ const READ_TOOL_NAMES = [
     'list_onu_models', 'subscriber_usage', 'usage_ranking', 'device_tasks', 'get_router', 'olt_poll_runs',
     'list_eoc_masters', 'live_traffic', 'export_report', 'build_report',
     'get_invoice', 'get_account_statement', 'list_debtors', 'list_cutoffs',
+    'get_subscriber_billing', 'list_subscriber_payments', 'get_subscriber_audit', 'get_invoice_pdf', 'get_payment_receipt',
 ];
 
 const WRITE_TOOL_NAMES = [
@@ -67,6 +68,7 @@ const WRITE_TOOL_NAMES = [
     'create_work_order', 'assign_work_order', 'update_work_order_status',
     'set_onu_admin_state', 'factory_reset_onu', 'optimize_wifi', 'restore_wifi', 'reprovision_onu', 'kick_pppoe',
     'locate_new_onu', 'swap_onu',
+    'record_payment', 'set_billing_modality', 'set_price_override', 'set_cutoff_override', 'update_subscriber_contact',
 ];
 
 /** The operator the agent runtime injects as the hidden `_operator` argument (Telegram DM). */
@@ -1302,7 +1304,7 @@ test('initialize hands over the condensed core rules, cloudisp_context first', a
 
     const { instructions, serverInfo } = decodeMessages(Buffer.from(written.join(''), 'utf8'))[0].result;
 
-    assert.equal(serverInfo.version, '0.6.0');
+    assert.equal(serverInfo.version, '0.7.0');
     assert.ok(instructions.startsWith('Llamá cloudisp_context al iniciar cada conversación y antes de delegar'));
     assert.equal(instructions.split('\n').length, 6);
 });
@@ -1560,7 +1562,7 @@ test('stdio smoke: newline framing answers initialize and lists every tool with 
     const initialize = messages.find((message) => message.id === 1);
     assert.equal(initialize.result.protocolVersion, '2025-06-18');
     assert.equal(initialize.result.serverInfo.name, 'cloudisp-mcp');
-    assert.equal(initialize.result.serverInfo.version, '0.6.0');
+    assert.equal(initialize.result.serverInfo.version, '0.7.0');
     assert.match(initialize.result.instructions, /CLOUDISP_ALLOW_WRITES=1/);
     assert.ok(initialize.result.capabilities.tools);
 
@@ -2893,5 +2895,192 @@ test('the billing tools are read tools, and the amounts they return are not stri
 
     for (const key of ['debt_cents', 'balance_cents', 'amount_cents', 'subscriber_name', 'debt_by_currency']) {
         assert.equal(REDACTED_KEYS.has(key), false, key);
+    }
+});
+
+// ─── v0.7.0: billing and administration tools ────────────────────────────────
+
+test('the billing reads ask the billing, payments and audit endpoints of the resolved subscriber, capped at 100 rows', async () => {
+    const ok = jsonResponse({ success: true, data: [] });
+    const routes = { 'GET /subscribers/42/billing': ok, 'GET /subscribers/42/payments': ok, 'GET /subscribers/42/audit': ok, 'GET /subscribers': ONE_SUBSCRIBER };
+
+    const billing = await run('get_subscriber_billing', { subscriber_id: 42 }, routes);
+
+    assert.deepEqual(sig(billing.calls), ['GET /subscribers/42/billing']);
+
+    for (const [tool, path] of [['list_subscriber_payments', 'payments'], ['get_subscriber_audit', 'audit']]) {
+        const limited = await run(tool, { subscriber_query: 'Perez', limit: 100 }, routes);
+
+        assert.deepEqual(sig(limited.calls), ['GET /subscribers', `GET /subscribers/42/${path}`]);
+        assert.equal(limited.calls[1].query.get('limit'), '100');
+
+        const plain = await run(tool, { subscriber_id: 42 }, routes);
+
+        assert.equal(plain.calls[0].query.has('limit'), false, 'the API default applies');
+
+        await assertRefused(tool, { subscriber_id: 42, limit: 101 });
+        await assertRefused(tool, { subscriber_id: 42, limit: 0 });
+    }
+});
+
+test('get_invoice_pdf and get_payment_receipt save the PDF and answer its MEDIA line, and refuse anything that is not a PDF', async () => {
+    const pdf = Buffer.from('%PDF-1.7 fake');
+
+    for (const [tool, args, route, pattern] of [
+        ['get_invoice_pdf', { invoice_id: 918 }, 'GET /invoices/918/pdf', /^factura-918-\d{14}\.pdf$/],
+        ['get_payment_receipt', { payment_id: 77 }, 'GET /payments/77/receipt', /^recibo-77-\d{14}\.pdf$/],
+    ]) {
+        const { result, calls, dir } = await runWithArtifacts(tool, { ...args, _operator: OPERATOR }, { [route]: fileResponse(pdf, 'application/pdf') });
+
+        assert.deepEqual(sig(calls), [route]);
+        assert.equal(calls[0].headers['X-CloudISP-Tool'], tool);
+        assert.equal(path.dirname(result.path), dir);
+        assert.match(path.basename(result.path), pattern);
+        assert.equal(result.media, `MEDIA:${result.path}`);
+        assert.deepEqual(fs.readFileSync(result.path), pdf);
+
+        const html = await runWithArtifacts(tool, args, { [route]: fileResponse(Buffer.from('<html>'), 'text/html') });
+
+        assert.equal(html.result.outcome, 'unexpected_response');
+        assert.deepEqual(fs.readdirSync(html.dir), []);
+
+        const missing = await runWithArtifacts(tool, args, { [route]: errorResponse(404, { code: 'not_found', message: 'Not found.' }) });
+
+        assert.equal(missing.result.outcome, 'not_found');
+    }
+
+    await assertRefused('get_invoice_pdf', {});
+    await assertRefused('get_payment_receipt', { payment_id: 'x' });
+});
+
+test('record_payment sends the amount as pesos with two decimals, never cents, and refuses a bad amount, method or time before any HTTP call', async () => {
+    const payment = jsonResponse({ success: true, data: { id: 77, receipt_number: '0001-00000042' } }, 201);
+    const routes = { 'POST /subscribers/42/payments': payment };
+
+    const { result, calls } = await run('record_payment', {
+        ...WRITE_ARGS, subscriber_id: 42, amount: 12500.5, method: 'cash', reference: 'Recibo 12', received_at: '2026-11-25T10:30',
+    }, routes);
+
+    assert.equal(result.data.receipt_number, '0001-00000042');
+    assert.deepEqual(sig(calls), ['POST /subscribers/42/payments']);
+    assert.deepEqual(calls[0].body, { amount: '12500.50', method: 'cash', reference: 'Recibo 12', received_at: '2026-11-25T10:30' });
+    assert.equal(calls[0].headers['Idempotency-Key'], 'op-1');
+    assert.equal(calls[0].headers['X-CloudISP-Tool'], 'record_payment');
+
+    const text = await run('record_payment', { ...WRITE_ARGS, subscriber_id: 42, amount: ' 800 ', method: 'transfer' }, routes);
+
+    assert.deepEqual(text.calls[0].body, { amount: '800.00', method: 'transfer' });
+
+    for (const bad of [0, '0.00', -5, '12.345', '1e3', 12.1234, 'doce mil', '', null, '12.500,50', 1e10]) {
+        await assertRefused('record_payment', { ...WRITE_ARGS, subscriber_id: 42, amount: bad, method: 'cash' });
+    }
+
+    await assertRefused('record_payment', { ...WRITE_ARGS, subscriber_id: 42, amount: 100, method: 'cheque' });
+    await assertRefused('record_payment', { ...WRITE_ARGS, subscriber_id: 42, amount: 100 });
+    await assertRefused('record_payment', { ...WRITE_ARGS, subscriber_id: 42, amount: 100, method: 'cash', received_at: '25/11/2026' });
+    await assertRefused('record_payment', { subscriber_id: 42, amount: 100, method: 'cash' });
+});
+
+test('set_billing_modality sends only the fields of the chosen modality, and a person-only modality never reaches the API', async () => {
+    const done = jsonResponse({ success: true, modality: 'plan' });
+    const routes = { 'POST /subscribers/42/billing/modality': done };
+    const send = async (args) => (await run('set_billing_modality', { ...WRITE_ARGS, subscriber_id: 42, ...args }, routes)).calls[0];
+
+    assert.deepEqual((await send({ modality: 'plan', kind: 'percent', value: 10 })).body, { modality: 'plan' });
+    assert.deepEqual((await send({ modality: 'no_cut', reason: 'office', note: 'Sede', value: 5 })).body, { modality: 'no_cut', reason: 'office', note: 'Sede' });
+
+    const percent = await send({ modality: 'dedicated_discount', kind: 'percent', value: '20', reason: 'Cliente histórico', starts_on: '2026-12-01', ends_on: '2027-05-31' });
+
+    assert.deepEqual(percent.body, { modality: 'dedicated_discount', kind: 'percent', reason: 'Cliente histórico', value: 20, starts_on: '2026-12-01', ends_on: '2027-05-31' });
+    assert.equal(percent.headers['Idempotency-Key'], 'op-1');
+
+    const fixed = await send({ modality: 'dedicated_discount', kind: 'fixed', value: 2500, reason: 'Promo' });
+
+    assert.equal(fixed.body.value, '2500.00');
+    assert.match(fixed.body.starts_on, /^\d{4}-\d{2}-\d{2}$/, 'starts_on defaults to today');
+    assert.equal(Object.hasOwn(fixed.body, 'ends_on'), false);
+
+    const human = await run('set_billing_modality', { ...WRITE_ARGS, subscriber_id: 42, modality: 'no_billing', reason: 'owner' }, routes);
+
+    assert.equal(human.result.outcome, 'human_only');
+    assert.equal(human.calls.length, 0);
+    assert.deepEqual(toolSchema('set_billing_modality').inputSchema.properties.modality.enum, ['plan', 'dedicated_discount', 'no_cut']);
+
+    const bad = { ...WRITE_ARGS, subscriber_id: 42, modality: 'dedicated_discount', kind: 'percent', value: 20, reason: 'x' };
+
+    for (const args of [
+        { ...WRITE_ARGS, subscriber_id: 42 },
+        { ...WRITE_ARGS, subscriber_id: 42, modality: 'free' },
+        { ...WRITE_ARGS, subscriber_id: 42, modality: 'no_cut' },
+        { ...WRITE_ARGS, subscriber_id: 42, modality: 'no_cut', reason: 'owner' },
+        { ...bad, value: 0 },
+        { ...bad, value: 101 },
+        { ...bad, value: 12.5 },
+        { ...bad, kind: 'fixed', value: 0 },
+        { ...bad, kind: 'cents' },
+        { ...bad, reason: '' },
+        { ...bad, starts_on: '2026-02-31' },
+        { ...bad, starts_on: '2026-12-01', ends_on: '2026-11-30' },
+    ]) {
+        await assertRefused('set_billing_modality', args);
+    }
+});
+
+test('set_price_override sends pesos or null, and refuses a missing price', async () => {
+    const routes = { 'POST /subscribers/42/billing/price': jsonResponse({ success: true }) };
+    const send = async (args) => (await run('set_price_override', { ...WRITE_ARGS, subscriber_id: 42, ...args }, routes)).calls[0];
+
+    assert.deepEqual((await send({ price: 18000 })).body, { price: '18000.00' });
+    assert.deepEqual((await send({ price: '0' })).body, { price: '0.00' }, 'a free price is allowed');
+    assert.deepEqual((await send({ price: null })).body, { price: null });
+
+    await assertRefused('set_price_override', { ...WRITE_ARGS, subscriber_id: 42 });
+    await assertRefused('set_price_override', { ...WRITE_ARGS, subscriber_id: 42, price: -1 });
+    await assertRefused('set_price_override', { ...WRITE_ARGS, subscriber_id: 42, price: '10.999' });
+});
+
+test('set_cutoff_override sends a date with its reason, or null to restore the usual day', async () => {
+    const routes = { 'POST /subscribers/42/billing/cutoff-override': jsonResponse({ success: true }) };
+    const send = async (args) => (await run('set_cutoff_override', { ...WRITE_ARGS, subscriber_id: 42, ...args }, routes)).calls[0];
+
+    assert.deepEqual((await send({ date: '2026-11-28', reason: 'promise' })).body, { date: '2026-11-28', reason: 'promise' });
+    assert.deepEqual((await send({ date: null, reason: 'holiday' })).body, { date: null, reason: null });
+
+    await assertRefused('set_cutoff_override', { ...WRITE_ARGS, subscriber_id: 42 });
+    await assertRefused('set_cutoff_override', { ...WRITE_ARGS, subscriber_id: 42, date: '2026-11-28' });
+    await assertRefused('set_cutoff_override', { ...WRITE_ARGS, subscriber_id: 42, date: '28/11/2026', reason: 'other' });
+    await assertRefused('set_cutoff_override', { ...WRITE_ARGS, subscriber_id: 42, date: '2026-11-28', reason: 'because' });
+});
+
+test('update_subscriber_contact PATCHes only the given contact fields and needs at least one', async () => {
+    const routes = { 'PATCH /subscribers/42/contact': jsonResponse({ success: true }) };
+    const { calls } = await run('update_subscriber_contact', { ...WRITE_ARGS, subscriber_id: 42, phone: ' 3875550000 ', city: 'Salta', email: '' }, routes);
+
+    assert.deepEqual(sig(calls), ['PATCH /subscribers/42/contact']);
+    assert.deepEqual(calls[0].body, { phone: '3875550000', city: 'Salta' });
+    assert.equal(calls[0].headers['Idempotency-Key'], 'op-1');
+
+    await assertRefused('update_subscriber_contact', { ...WRITE_ARGS, subscriber_id: 42 });
+    await assertRefused('update_subscriber_contact', { ...WRITE_ARGS, subscriber_id: 42, address: '   ' });
+    await assertRefused('update_subscriber_contact', { ...WRITE_ARGS, subscriber_id: 42, phone: 3875550000 });
+});
+
+test('a human_only refusal of the API is an expected outcome with its own hint, and the new writes follow the write guardrail', async () => {
+    const refused = await run('set_billing_modality', { ...WRITE_ARGS, subscriber_id: 42, modality: 'plan' }, {
+        'POST /subscribers/42/billing/modality': errorResponse(403, { code: 'human_only', message: 'Only a person can set this.' }),
+    });
+
+    assert.equal(refused.result.outcome, 'human_only');
+    assert.match(refused.result.hint, /una persona/);
+
+    const hidden = await listedTools({ CLOUDISP_ALLOW_WRITES: undefined });
+
+    for (const name of ['record_payment', 'set_billing_modality', 'set_price_override', 'set_cutoff_override', 'update_subscriber_contact']) {
+        assert.equal(hidden.some((tool) => tool.name === name), false, name);
+        assert.equal((await dispatch(name, {}, mockApi({}).fetchImpl, {}, virtualClock())).outcome, 'writes_disabled', name);
+    }
+
+    for (const name of ['get_subscriber_billing', 'list_subscriber_payments', 'get_subscriber_audit', 'get_invoice_pdf', 'get_payment_receipt']) {
+        assert.equal(hidden.find((tool) => tool.name === name).annotations.readOnlyHint, true, name);
     }
 });
