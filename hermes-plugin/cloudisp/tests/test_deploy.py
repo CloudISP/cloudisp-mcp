@@ -107,6 +107,8 @@ def test_new_tenant_writes_secrets_only_to_600_files_and_never_prints_them(sandb
     assert stat.S_IMODE(profile_env.stat().st_mode) == 0o600 and stat.S_IMODE(mcp_env.stat().st_mode) == 0o600
     assert "OPENCODE_GO_API_KEY=FAKE-MODEL-KEY" in profile_env.read_text() and "TELEGRAM_HOME_CHANNEL=123456789" in profile_env.read_text()
     assert "CLOUDISP_REQUIRE_OPERATOR=1" in mcp_env.read_text() and "CLOUDISP_API_BASE=https://sandbox.invalid" in mcp_env.read_text()
+    assert "CLOUDISP_TELEGRAM_BOT_TOKEN=op://V/token/c\n" in mcp_env.read_text(), "the delivery env keeps the op:// reference, never the token"
+    assert "FAKE-TELEGRAM-TOKEN" not in mcp_env.read_text()
 
     for secret in ("FAKE-TELEGRAM-TOKEN", "fake-cloudisp-api-key", "FAKE-MODEL-KEY"):
         assert secret not in result.stdout + result.stderr
@@ -194,3 +196,73 @@ def test_host_setup_is_idempotent_and_refuses_a_bot_token_in_the_host_env(sandbo
     refused = run("host-setup.sh", [], sandbox)
 
     assert refused.returncode != 0 and "TELEGRAM_BOT_TOKEN" in refused.stderr and "FAKE" not in refused.stderr
+
+
+def test_new_tenant_prepares_the_report_delivery_for_the_telegram_chat_it_was_given(sandbox):
+    with_id = run("new-tenant.sh", ["acme", "Acme", "op://V/token/c", "op://V/key/c", "123456789"], sandbox)
+    units = sandbox["home"] / ".config" / "systemd" / "user"
+
+    assert with_id.returncode == 0, with_id.stderr
+    assert "CLOUDISP_REPORT_CHAT_IDS=123456789\n" in (sandbox["tmp"] / "cfg" / "acme.env").read_text()
+    assert (units / "report-delivery@.service").is_symlink() and (units / "report-delivery@.timer").is_symlink()
+    assert (units / "report-delivery@.service").read_text() == (DEPLOY / "report-delivery@.service").read_text()
+
+    without_id = run("new-tenant.sh", ["beta", "Beta", "op://V/token/c", "op://V/key/c"], sandbox)
+
+    assert without_id.returncode == 0, without_id.stderr
+    assert "CLOUDISP_REPORT_CHAT_IDS=\n" in (sandbox["tmp"] / "cfg" / "beta.env").read_text()
+    assert "CLOUDISP_REPORT_CHAT_IDS" in without_id.stdout and "report-delivery@beta.timer" in without_id.stdout, "the manual step names the chat ids and the timer"
+    assert "report-delivery@beta.timer" not in without_id.stderr, "no timer is enabled without a chat to send to"
+
+
+def test_the_report_delivery_units_run_the_wrapper_every_five_minutes_as_user_units():
+    service = (DEPLOY / "report-delivery@.service").read_text()
+    timer = (DEPLOY / "report-delivery@.timer").read_text()
+
+    assert "Type=oneshot" in service and "User=" not in service, "a user unit: %h is the home of the bot user"
+    assert "ExecStart=%h/.local/share/cloudisp-mcp/bin/cloudisp-deliver-reports %i" in service
+    assert "OnCalendar=*:0/5" in timer and "WantedBy=timers.target" in timer
+    assert os.access(REPO / "bin" / "cloudisp-deliver-reports", os.X_OK) and os.access(REPO / "scripts" / "deliver-reports.mjs", os.X_OK)
+
+
+def test_render_soul_rewrites_the_soul_from_the_template_keeping_the_names_of_the_first_line(sandbox):
+    assert run("new-tenant.sh", ["acme", "Acme S.A.", "op://V/token/c", "op://V/key/c", "123456789"], sandbox, BOT_NAME="Asistente Acme").returncode == 0
+    soul_file = sandbox["root"] / "profiles" / "cloudisp-acme" / "SOUL.md"
+    soul_file.write_text("# Asistente Acme · Acme S.A.\n\nreglas viejas\n")
+
+    result = run("render-soul.sh", ["acme"], sandbox)
+    soul = soul_file.read_text()
+
+    assert result.returncode == 0, result.stderr
+    assert soul.startswith("# Asistente Acme · Acme S.A.\n") and "reglas viejas" not in soul
+    assert "## Informes y red" in soul and "pdf_unavailable" in soul
+    assert not re.search(r"hermes|nous|omh|opencode|deepseek|\{BOT_NAME\}|\{TENANT_NAME\}", soul, re.IGNORECASE)
+    assert stat.S_IMODE(soul_file.stat().st_mode) == 0o600
+
+    renamed = run("render-soul.sh", ["acme", "Otro Nombre"], sandbox)
+
+    assert renamed.returncode == 0, renamed.stderr
+    assert soul_file.read_text().startswith("# Asistente CloudISP · Otro Nombre\n"), "BOT_NAME defaults to the product name when the first line is not read"
+    assert not any("Otro Nombre" in call for call in calls(sandbox)), "rendering the SOUL runs no hermes command"
+
+
+@pytest.mark.parametrize("args, message", [
+    (["Bad_Slug"], "slug inválido"),
+    (["nope"], "no existe"),
+    (["acme", "Nombre\nen dos líneas"], "no puede estar vacío"),
+])
+def test_render_soul_refuses_what_it_cannot_render(sandbox, args, message):
+    (sandbox["root"] / "profiles" / "cloudisp-acme").mkdir()
+    (sandbox["root"] / "profiles" / "cloudisp-acme" / "SOUL.md").write_text("sin formato\n")
+    result = run("render-soul.sh", args, sandbox)
+
+    assert result.returncode != 0 and message in result.stderr
+    assert (sandbox["root"] / "profiles" / "cloudisp-acme" / "SOUL.md").read_text() == "sin formato\n"
+
+
+def test_render_soul_needs_the_names_when_the_first_line_is_not_recognised(sandbox):
+    (sandbox["root"] / "profiles" / "cloudisp-acme").mkdir()
+    (sandbox["root"] / "profiles" / "cloudisp-acme" / "SOUL.md").write_text("sin formato\n")
+    result = run("render-soul.sh", ["acme"], sandbox)
+
+    assert result.returncode != 0 and "primera línea" in result.stderr

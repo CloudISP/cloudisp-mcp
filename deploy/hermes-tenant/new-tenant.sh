@@ -12,6 +12,8 @@
 # `op read` y se escriben sólo en archivos de modo 600: nunca se imprimen ni pasan por argv.
 # La configuración se aplica con `hermes -p <perfil> config set`; no se reescribe ningún YAML.
 # El bot de Telegram y el api_client los crea una persona (BotFather y un master admin del admin).
+# Deja listo el reparto de los informes programados al bot: CLOUDISP_REPORT_CHAT_IDS (por defecto el id de Telegram dado) y el timer
+# report-delivery@<slug> de systemd (usuario), que sólo se habilita cuando hay un chat al que mandarlos.
 #
 # Variables opcionales: HERMES_HOME (la raíz de hermes; también se respeta HERMES_HOME_DIR), CLOUDISP_MCP_HOME, CLOUDISP_MCP_CONFIG_DIR, CLOUDISP_API_BASE,
 # SOURCE_PROFILE (perfil del que se copia OPENCODE_GO_API_KEY, por defecto cloudisp-nvs), BOT_NAME.
@@ -84,16 +86,15 @@ chmod 700 "$CFG_DIR" "$ARTIFACT_DIR"
     printf 'CLOUDISP_ALLOW_WRITES=1\n'
     printf 'CLOUDISP_REQUIRE_OPERATOR=1\n'
     printf 'CLOUDISP_ARTIFACT_DIR=%s\n' "$ARTIFACT_DIR"
+    # Reparto de informes programados (scripts/deliver-reports.mjs): el token del bot queda como referencia op://, que bin/cloudisp-deliver-reports resuelve con `op run`.
+    printf 'CLOUDISP_TELEGRAM_BOT_TOKEN=%s\n' "$TOKEN_REF"
+    printf 'CLOUDISP_REPORT_CHAT_IDS=%s\n' "$TG_USER"
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 unset BOT_TOKEN API_KEY MODEL_KEY
 
 # Identidad: el template genérico con el nombre del bot y del cliente (sin datos de red: esos van a la KB).
-shopt -u patsub_replacement 2>/dev/null || true
-SOUL="$(< "$TEMPLATE")"
-SOUL="${SOUL//\{BOT_NAME\}/$BOT_NAME}"
-SOUL="${SOUL//\{TENANT_NAME\}/$TENANT}"
-printf '%s\n' "$SOUL" > "$PROFILE_DIR/SOUL.md"
+BOT_NAME="$BOT_NAME" "$MCP_HOME/deploy/hermes-tenant/render-soul.sh" "$SLUG" "$TENANT" >/dev/null
 
 # Plugin del perfil (el del host lo instala host-setup.sh).
 mkdir -p "$PROFILE_DIR/plugins"
@@ -145,12 +146,24 @@ cfg display.status_phrases.generic '[en eso, un momento, consultando CloudISP]'
 cfg onboarding.seen.busy_input_prompt true
 cfg onboarding.seen.tool_progress_prompt true
 
+# Timer de reparto de informes: unidades de usuario (el script corre como `hermes`, sin root); hace falta `loginctl enable-linger hermes` una vez por host.
+if [ -n "$TG_USER" ]; then
+    unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$unit_dir"
+    for unit in "report-delivery@.service" "report-delivery@.timer"; do
+        ln -sfn "$MCP_HOME/deploy/hermes-tenant/$unit" "$unit_dir/$unit"
+    done
+    if ! { command -v systemctl >/dev/null && systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now "report-delivery@$SLUG.timer" 2>/dev/null; }; then
+        echo "new-tenant: no pude habilitar report-delivery@$SLUG.timer (systemctl --user): habilitalo a mano con \`systemctl --user enable --now report-delivery@$SLUG.timer\`." >&2
+    fi
+fi
+
 echo "new-tenant: perfil $PROFILE creado ($PROFILE_DIR) y entorno del MCP en $ENV_FILE (modo 600)."
 echo "Falta a mano:"
 step=0
 todo() { step=$((step + 1)); echo "  $step. $*"; }
 todo "BotFather: nombre \"$BOT_NAME · $TENANT\" y foto (/setuserpic con el logo de CloudISP)."
-[ -n "$TG_USER" ] || todo "Completar TELEGRAM_ALLOWED_USERS y TELEGRAM_HOME_CHANNEL en $PROFILE_DIR/.env (id numérico del usuario autorizado)."
+[ -n "$TG_USER" ] || todo "Completar TELEGRAM_ALLOWED_USERS y TELEGRAM_HOME_CHANNEL en $PROFILE_DIR/.env y CLOUDISP_REPORT_CHAT_IDS en $ENV_FILE (id numérico del usuario autorizado), y habilitar el reparto de informes: systemctl --user enable --now report-delivery@$SLUG.timer."
 todo "host-setup.sh una vez por host (plugin y claves del gateway) y la KB del cliente en el admin."
 todo "Reiniciar hermes-gateway SÓLO sin turnos ni delegaciones en curso."
 todo "Verificar el arranque: grep -h CLOUDISP_PLUGIN_READY ~/.hermes/logs/agent.log ~/.hermes/logs/gateway.log (patches=ok) y que no haya CLOUDISP_PATCH_FAILED en errors.log."
