@@ -16,6 +16,8 @@ datos.
 - Node.js **18 o superior** y `git`.
 - Opcional: [1Password CLI](https://developer.1password.com/docs/cli/) (`op`)
   si querés guardar la clave en 1Password en vez de en un archivo.
+- Opcional: Chromium (`chromium`, o la ruta en `CLOUDISP_CHROMIUM_BIN`) para que
+  `build_report` imprima el informe en PDF; sin él devuelve el HTML.
 
 ## Instalación rápida
 
@@ -62,6 +64,7 @@ Cada entorno es un archivo `~/.config/cloudisp-mcp/<entorno>.env`:
 | `CLOUDISP_ALLOW_WRITES` | no | `1` habilita las herramientas de escritura. Cualquier otro valor las oculta. |
 | `CLOUDISP_REQUIRE_OPERATOR` | no | `1` rechaza toda escritura que llegue sin identidad del operador (`operator_required`, sin ningún pedido HTTP). Usalo en cualquier bot. |
 | `CLOUDISP_ARTIFACT_DIR` | no | Carpeta de los archivos que arman `export_report` y `build_report` (por defecto `~/.cache/cloudisp-artifacts`, modo 700; se borra lo de más de 24 h). |
+| `CLOUDISP_CHROMIUM_BIN` | no | Chromium con el que `build_report` imprime el PDF (por defecto `chromium` del `PATH`). |
 
 Con una referencia `op://` el servidor arranca vía `op run`, así que la clave
 nunca queda en disco.
@@ -153,9 +156,9 @@ empieza con `ESCRITURA (requiere confirmación del operador): ` y exigen
 | `get_alert` | `GET /network/alerts/{id}` | `network:read` (el nombre del abonado, además `subscribers:read`) | lectura |
 | `device_metrics` | `GET /network/devices/{kind}/{id}/metrics/catalog` (con `search`, `family_id`, `template_id`, `state`, `selected`, `cursor`, `limit`) · `/series` | `network:read` | lectura |
 | `platform_logs` | `GET /logs/events` | `network:read` | lectura |
-| `list_reports` · `run_report` | `GET /reports` · `/reports/{key}` | `reports:read` | lectura |
+| `list_reports` · `run_report` | `GET /reports` · `/reports/{key}` (`detail: true` agrega `?detail=1`: el detalle fila por fila de `ventas` y `otestado`) | `reports:read` | lectura |
 | `export_report` | `GET /reports/{key}?format=pdf\|csv` (`from`/`to` viajan como `filter_period`, más `filters` libres; guarda el archivo y devuelve su línea `MEDIA:`) | `reports:read` | lectura |
-| `build_report` | sin pedido a la API: arma un HTML autocontenido con KPIs, tablas y gráficos SVG | — | lectura |
+| `build_report` | `GET /agent/context` (sólo para la marca, una vez cada 15 min) y arma el informe: KPIs, tablas y gráficos SVG, impreso a PDF con Chromium (`format: html` o sin Chromium: HTML) | `knowledge:read` | lectura |
 | `list_internet_profiles` | `GET /internet-profiles` (`status`, por defecto `active`) | `profiles:read` | lectura |
 | `list_plans` | `GET /plans` | `plans:read` | lectura |
 | `list_invoices` | `GET /invoices` (`status`: `draft`, `issued`, `void`) | `invoices:read` | lectura |
@@ -371,13 +374,26 @@ de la sesión (`HERMES_SESSION_USER_ID` y `HERMES_SESSION_PLATFORM`; un `_operat
 `build_report` guardan el archivo en `CLOUDISP_ARTIFACT_DIR` y responden
 `{"ok": true, "path": "...", "media": "MEDIA:<path>", "bytes": N}`; el agente lo
 manda al chat incluyendo la línea `media` tal cual en su respuesta (Hermes la
-convierte en un adjunto). `build_report` recibe `title`, `subtitle` y hasta 20
-`sections` (`heading`, `text`, `kpis`, `table` de hasta 200 filas, `chart` de
-tipo `bar`, `line` o `donut`) y genera un HTML en español con el logo, la paleta
-de la marca, CSS de impresión y los gráficos como SVG en línea, sin dependencias
-ni pedidos externos. Un valor `null` se dibuja como hueco y se rotula
-«no disponible»; nunca como 0. No hay PNG: si un cliente pide gráficos como
-imagen en el chat, hace falta sumar un rasterizador.
+convierte en un adjunto). `build_report` recibe `title`, `subtitle`, `kind` (el tipo de
+informe, sobre el título de la portada), `period` (la línea del período de la portada),
+`format` (`pdf` por defecto, o `html`) y hasta 20 `sections` (`heading`, `text`, `kpis`,
+`table` de hasta 200 filas, `chart` de tipo `bar`, `line` o `donut`), y arma un HTML en
+español con CSS de impresión y los gráficos como SVG en línea, sin dependencias ni
+pedidos externos (CSP que bloquea todo). Un valor `null` se dibuja como hueco y se
+rotula «no disponible»; nunca como 0.
+
+**Marca.** Antes de armar el informe pregunta una vez a `GET /agent/context` (y lo recuerda
+15 minutos) qué marca le toca a la plataforma de la clave (`report_branding`): un cliente de
+NextScale recibe la portada azul `#0D1B3E` con el logo oficial, el tipo, el título y el período
+con la hora de corte y «Preparado para <cliente>»; páginas con el título arriba y el pie
+«Documento confidencial · Preparado por NextScale» y «Pág. N»; títulos Trebuchet MS y cuerpo
+Calibri (Fira Sans y Carlito, incrustadas, donde no están); gráficos con la paleta de la marca. Con
+cualquier otra plataforma, o si el contexto no se puede leer, sale con el estilo de CloudISP de siempre.
+
+**PDF.** `lib/pdf.mjs` imprime el HTML con `chromium --headless=new --no-sandbox --print-to-pdf` (sin
+sandbox porque el LXC sin privilegios no tiene user namespaces; el HTML lo genera el propio servidor y
+su CSP bloquea todo pedido) y borra el HTML. Si Chromium falta o falla, la herramienta no falla: devuelve
+el HTML con `pdf_unavailable: true`.
 
 ### Guía
 
@@ -403,6 +419,7 @@ tarjeta de aprobación). Los tests fallan si alguno de los dos está desactualiz
 | `cloudisp-bandwidth` | Cambio de plan o de perfil de un abonado. |
 | `cloudisp-disconnect` | Corte y reconexión, con orden de trabajo opcional. |
 | `cloudisp-ordenes-trabajo` | Crear y asignar órdenes de trabajo. |
+| `cloudisp-informes` | Informes en PDF con marca: Reporte de ventas y Estado de órdenes de trabajo. |
 
 Las skills responden en español.
 
@@ -441,8 +458,10 @@ aprobación en español, registro de consumo, limpieza de marcas); su
 [README](hermes-plugin/cloudisp/README.md) documenta las APIs de Hermes que usa. Al
 arrancar deja en el log la línea `CLOUDISP_PLUGIN_READY patches=ok …` (o
 `patches=failed:…` y un `CLOUDISP_PATCH_FAILED` por parche que no se pudo aplicar).
-`deploy/hermes-tenant/` tiene el template (`SOUL.md.tmpl`) y `new-tenant.sh`, que
-crea el perfil `cloudisp-<cliente>` con toda la configuración. El bot de Telegram
+`deploy/hermes-tenant/` tiene el template (`SOUL.md.tmpl`), `new-tenant.sh`, que
+crea el perfil `cloudisp-<cliente>` con toda la configuración, y `render-soul.sh <cliente>`, que
+vuelve a escribir el `SOUL.md` de un perfil existente con el template actual (sin recrearlo; el
+nombre del bot y del cliente salen de la primera línea del `SOUL.md`). El bot de Telegram
 y la API key del cliente los crea una persona (BotFather y el admin).
 
 Los dos scripts respetan `HERMES_HOME` (la variable de Hermes; si apunta a un perfil
@@ -461,6 +480,24 @@ Con un `HERMES_HOME` que no es el del host, el primer `hermes` arma su propio en
 dependencias en esa raíz (unos 80 s, ~400 MB y red); en el host de producción no pasa.
 `HOME` también va al sandbox: el alias `cloudisp-<cliente>` se crea en `~/.local/bin` y el
 directorio de informes en `~/.cache/cloudisp-artifacts`.
+
+### Informes programados al bot
+
+Un informe programado con destinatario «Agente» queda en cola en el admin; `scripts/deliver-reports.mjs`
+(lanzador `bin/cloudisp-deliver-reports <cliente>`) lo baja y lo manda como documento a cada chat de
+`CLOUDISP_REPORT_CHAT_IDS` por Telegram, y sólo cuando **todos** lo recibieron lo confirma al admin
+(`POST /agent/report-deliveries/{id}/ack`); si algo falla se reintenta en la próxima corrida y un archivo
+de estado evita repetir el envío a los chats que ya lo tienen. Lee el mismo `~/.config/cloudisp-mcp/<cliente>.env`
+que el MCP, con estas variables más (`new-tenant.sh` las escribe; si hay una referencia `op://` se resuelve con `op run`):
+
+| Variable | Descripción |
+| --- | --- |
+| `CLOUDISP_TELEGRAM_BOT_TOKEN` | Token del bot (referencia `op://`). Sólo se usa para `sendDocument`; nunca se registra. |
+| `CLOUDISP_REPORT_CHAT_IDS` | Ids de chat de Telegram, separados por comas (por defecto, el usuario autorizado del bot). |
+
+Corre cada 5 minutos con `deploy/hermes-tenant/report-delivery@.service` y `.timer` (unidades de **usuario**:
+`systemctl --user enable --now report-delivery@<cliente>.timer`, y `loginctl enable-linger hermes` una vez por
+host). `new-tenant.sh` las enlaza en `~/.config/systemd/user` y habilita el timer cuando le pasás el id de Telegram.
 
 ## Desinstalar
 

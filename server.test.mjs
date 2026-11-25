@@ -10,11 +10,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import { PassThrough } from 'node:stream';
 
+import { brandFor, CLOUDISP_BRAND } from './lib/brands.mjs';
 import { renderGuide, renderWriteTools } from './lib/guide.mjs';
-import { awaitTask, dispatch, guideCatalog, listTools, REDACTED_KEYS, startServer, toDisplayTime } from './server.mjs';
+import { normalizeReport, renderReportHtml } from './lib/report-html.mjs';
+import { awaitTask, dispatch, guideCatalog, listTools, REDACTED_KEYS, resetReportBrandCache, startServer, toDisplayTime } from './server.mjs';
 
 const SERVER_PATH = fileURLToPath(new URL('./server.mjs', import.meta.url));
 const API_BASE = 'https://admin.cloudisp.test';
@@ -1304,7 +1306,7 @@ test('initialize hands over the condensed core rules, cloudisp_context first', a
 
     const { instructions, serverInfo } = decodeMessages(Buffer.from(written.join(''), 'utf8'))[0].result;
 
-    assert.equal(serverInfo.version, '0.7.0');
+    assert.equal(serverInfo.version, '0.8.0');
     assert.ok(instructions.startsWith('Llamá cloudisp_context al iniciar cada conversación y antes de delegar'));
     assert.equal(instructions.split('\n').length, 6);
 });
@@ -1562,7 +1564,7 @@ test('stdio smoke: newline framing answers initialize and lists every tool with 
     const initialize = messages.find((message) => message.id === 1);
     assert.equal(initialize.result.protocolVersion, '2025-06-18');
     assert.equal(initialize.result.serverInfo.name, 'cloudisp-mcp');
-    assert.equal(initialize.result.serverInfo.version, '0.7.0');
+    assert.equal(initialize.result.serverInfo.version, '0.8.0');
     assert.match(initialize.result.instructions, /CLOUDISP_ALLOW_WRITES=1/);
     assert.ok(initialize.result.capabilities.tools);
 
@@ -2374,7 +2376,7 @@ test('every artifact write first deletes the files older than 24 hours', async (
     fs.utimesSync(stale, new Date(Date.now() - 25 * 3600 * 1000), new Date(Date.now() - 25 * 3600 * 1000));
 
     const api = mockApi({});
-    const result = await dispatch('build_report', { title: 'T', sections: [{ heading: 'H' }] }, api.fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir }, virtualClock());
+    const result = await dispatch('build_report', { title: 'T', sections: [{ heading: 'H' }], format: 'html' }, api.fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir }, virtualClock());
 
     assert.equal(result.ok, true);
     assert.equal(fs.existsSync(stale), false);
@@ -2383,16 +2385,17 @@ test('every artifact write first deletes the files older than 24 hours', async (
 
 test('the artifact directory is created with mode 700 when it does not exist', async () => {
     const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cloudisp-artifacts-')), 'nested', 'out');
-    const result = await dispatch('build_report', { title: 'T', sections: [{ heading: 'H' }] }, mockApi({}).fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir }, virtualClock());
+    const result = await dispatch('build_report', { title: 'T', sections: [{ heading: 'H' }], format: 'html' }, mockApi({}).fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir }, virtualClock());
 
     assert.equal(result.ok, true);
     assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
 });
 
-test('build_report writes a self-contained HTML file with the KPIs, the table and the SVG charts, and makes no API call', async () => {
+test('build_report writes a self-contained HTML file with the KPIs, the table and the SVG charts, and only asks the API for the brand', async () => {
     const { result, calls } = await runWithArtifacts('build_report', {
         title: 'Consumo de la PON 8 · 300 Viviendas',
         subtitle: 'Octubre 2026',
+        format: 'html',
         sections: [
             {
                 heading: 'Resumen',
@@ -2407,9 +2410,9 @@ test('build_report writes a self-contained HTML file with the KPIs, the table an
             { heading: 'Evolución', chart: { type: 'line', categories: ['a', 'b', 'c', 'd'], series: [{ name: 'Mbps', data: [1, 2, null, 4] }] } },
             { heading: 'Reparto', chart: { type: 'donut', categories: ['Pinares', 'Cerrillos'], series: [{ name: 'ONU', data: [30, 70] }] } },
         ],
-    });
+    }, { 'GET /agent/context': jsonResponse({ success: true, data: { report_branding: { brand: null, client_name: null, prepared_by: null } } }) });
 
-    assert.deepEqual(calls, []);
+    assert.deepEqual(sig(calls), ['GET /agent/context']);
     assert.equal(result.ok, true);
     assert.match(path.basename(result.path), /^informe-consumo-de-la-pon-8-300-viviendas-\d{14}\.html$/);
     assert.equal(result.media, `MEDIA:${result.path}`);
@@ -3146,4 +3149,221 @@ test('the model cannot name the speaker through a tool argument: only the hidden
 
         assert.equal(names.some((name) => name.includes('operator') || name.includes('speaker') || name.includes('behalf')), false, tool.name);
     }
+});
+
+// ─── v0.8.0: branded PDF informes ────────────────────────────────────────────
+
+afterEach(resetReportBrandCache);
+
+const NEXTSCALE_CONTEXT = jsonResponse({
+    success: true,
+    data: { platform: { id: 2, name: 'NVS InterService' }, report_branding: { brand: 'nextscale', client_name: 'NorteVisión', prepared_by: 'NextScale' } },
+});
+
+const VENTAS_REPORT = {
+    title: 'Noviembre 2026',
+    kind: 'Reporte de ventas',
+    period: 'Ventas del 1 al 19 de noviembre de 2026',
+    sections: [
+        { heading: 'Ventas del mes', kpis: [{ label: 'Altas de contrato', value: 42 }, { label: 'Bajas', value: null }] },
+        { heading: '02 · Altas por día', chart: { type: 'bar', categories: ['03/11', '04/11'], series: [{ name: 'Altas', data: [3, 9] }] } },
+        { heading: 'Detalle', table: { columns: ['Localidad', 'Altas'], rows: [['Pinares', 12]] } },
+    ],
+};
+
+/**
+ * A Chromium double: it logs its arguments, keeps a copy of the HTML it was asked to print and writes a PDF where `--print-to-pdf` points.
+ *
+ * @param {{ writePdf?: boolean, exit?: number }} [options] `writePdf: false` leaves no file; `exit` is its exit code.
+ * @return {{ bin: string, args: Function, html: Function }}
+ */
+function fakeChromium({ writePdf = true, exit = 0 } = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudisp-chromium-stub-'));
+    const bin = path.join(dir, 'chromium');
+    const log = path.join(dir, 'args');
+    const copy = path.join(dir, 'page.html');
+
+    fs.writeFileSync(bin, [
+        '#!/bin/sh',
+        `printf '%s\\n' "$@" > '${log}'`,
+        'for arg in "$@"; do case "$arg" in --print-to-pdf=*) pdf="${arg#--print-to-pdf=}";; file://*) src="${arg#file://}";; esac; done',
+        `cp "$src" '${copy}'`,
+        writePdf ? 'printf \'%%PDF-1.4 stub\' > "$pdf"' : ':',
+        `exit ${exit}`,
+    ].join('\n'), { mode: 0o755 });
+
+    return { bin, args: () => fs.readFileSync(log, 'utf8').trim().split('\n'), html: () => fs.readFileSync(copy, 'utf8') };
+}
+
+/**
+ * @param {object} args `build_report` arguments.
+ * @param {object} api Recording API double.
+ * @param {object} env Extra environment (`CLOUDISP_CHROMIUM_BIN`).
+ * @return {Promise<{ result: object, dir: string }>} The tool answer and its artifact directory.
+ */
+async function buildReport(args, api, env) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudisp-artifacts-'));
+    const result = await dispatch('build_report', args, api.fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir, ...env }, virtualClock());
+
+    return { result, dir };
+}
+
+test('build_report makes a PDF in the NextScale look when the context names the brand, and asks the context once', async () => {
+    const chromium = fakeChromium();
+    const api = mockApi({ 'GET /agent/context': NEXTSCALE_CONTEXT });
+    const { result, dir } = await buildReport({ ...VENTAS_REPORT, _operator: OPERATOR }, api, { CLOUDISP_CHROMIUM_BIN: chromium.bin });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.pdf_unavailable, undefined);
+    assert.equal(path.dirname(result.path), dir);
+    assert.match(path.basename(result.path), /^informe-reporte-de-ventas-noviembre-2026-\d{14}\.pdf$/);
+    assert.equal(result.media, `MEDIA:${result.path}`);
+    assert.equal(result.bytes, fs.statSync(result.path).size);
+    assert.deepEqual(fs.readdirSync(dir), [path.basename(result.path)], 'the HTML is not left behind');
+    assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
+    assert.deepEqual(sig(api.calls), ['GET /agent/context']);
+    assert.equal(api.calls[0].headers['X-CloudISP-Tool'], 'build_report');
+
+    const args = chromium.args();
+
+    for (const flag of ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-pdf-header-footer']) {
+        assert.ok(args.includes(flag), flag);
+    }
+
+    assert.ok(args.includes(`--print-to-pdf=${result.path}`));
+    assert.match(args.at(-1), /^file:\/\/.+\.html$/);
+
+    const html = chromium.html();
+
+    assert.match(html, /<section class="cover">\s*<svg /, 'the official logo opens the cover');
+    assert.match(html, /<p class="eyebrow">Reporte de ventas<\/p>/);
+    assert.match(html, /<h1>Noviembre 2026<\/h1>/);
+    assert.match(html, /Ventas del 1 al 19 de noviembre de 2026 · Corte \d{2}\/\d{2}\/\d{4} \d{2}:\d{2}/);
+    assert.match(html, /<p class="for">Preparado para NorteVisión<\/p>/);
+    assert.ok(html.includes('#0D1B3E') && html.includes('#00B4D8'));
+    assert.ok(html.includes('content:"Documento confidencial · Preparado por NextScale"'));
+    assert.ok(html.includes('content:"Pág. " counter(page)'));
+    assert.ok(html.includes('@page :first{margin:0;'), 'the cover has no margin and no footer');
+    assert.match(html, /<h2><span class="n">01 ·<\/span> Ventas del mes<\/h2>/, 'a plain heading gets its number');
+    assert.match(html, /<h2>02 · Altas por día<\/h2>/, 'a heading the agent numbered is kept');
+    assert.match(html, /<h2><span class="n">03 ·<\/span> Detalle<\/h2>/);
+    assert.ok(html.includes('fill="#0D1B3E"'), 'charts take the brand palette');
+    assert.equal((html.match(/data:font\/woff2;base64,/g) ?? []).length, 4, 'Carlito regular and bold, Fira Sans semibold and bold');
+    assert.ok(html.includes('font-family:\'Trebuchet MS\',\'Fira Sans\'') && html.includes('font-family:Calibri,Carlito'));
+    assert.ok(html.includes('font-src data:'));
+    assert.equal(/<script|https?:\/\/(?!www\.w3\.org)/.test(html), false, 'no scripts, no external requests');
+
+    const again = await dispatch('build_report', VENTAS_REPORT, api.fetchImpl, { ...WRITES_ON, CLOUDISP_ARTIFACT_DIR: dir, CLOUDISP_CHROMIUM_BIN: chromium.bin }, virtualClock());
+
+    assert.equal(again.ok, true);
+    assert.equal(api.calls.length, 1, 'the brand is kept for the next informe');
+});
+
+test('build_report keeps the HTML and says so when Chromium is missing, fails or writes nothing', async () => {
+    const broken = [
+        path.join(os.tmpdir(), 'no-such-chromium'),
+        fakeChromium({ exit: 1 }).bin,
+        fakeChromium({ writePdf: false }).bin,
+    ];
+
+    for (const bin of broken) {
+        const { result, dir } = await buildReport(VENTAS_REPORT, mockApi({ 'GET /agent/context': NEXTSCALE_CONTEXT }), { CLOUDISP_CHROMIUM_BIN: bin });
+
+        assert.equal(result.ok, true, bin);
+        assert.equal(result.pdf_unavailable, true, bin);
+        assert.match(path.basename(result.path), /\.html$/, bin);
+        assert.equal(result.media, `MEDIA:${result.path}`);
+        assert.match(fs.readFileSync(result.path, 'utf8'), /Preparado para NorteVisión/, 'still the NextScale informe');
+        assert.deepEqual(fs.readdirSync(dir), [path.basename(result.path)], bin);
+        resetReportBrandCache();
+    }
+});
+
+test('build_report falls back to the CloudISP look when the context cannot be read, and asks again the next time', async () => {
+    for (const context of [errorResponse(403, { code: 'forbidden', message: 'Missing scope.' }), () => { throw new Error('network down'); }]) {
+        const chromium = fakeChromium();
+        const api = mockApi({ 'GET /agent/context': context });
+        const first = await buildReport(VENTAS_REPORT, api, { CLOUDISP_CHROMIUM_BIN: chromium.bin });
+
+        assert.match(path.basename(first.result.path), /\.pdf$/);
+
+        const html = chromium.html();
+
+        assert.ok(html.includes('Generado por el Asistente CloudISP'));
+        assert.equal(html.includes('NextScale'), false);
+        assert.ok(html.includes('fill="#c026a3"'));
+
+        await buildReport(VENTAS_REPORT, api, { CLOUDISP_CHROMIUM_BIN: chromium.bin });
+
+        assert.equal(api.calls.length, 2, 'a failed context is not cached');
+    }
+});
+
+test('build_report format html skips Chromium, and a bad format, kind or period is refused before any HTTP call', async () => {
+    const api = mockApi({ 'GET /agent/context': NEXTSCALE_CONTEXT });
+    const { result } = await buildReport({ ...VENTAS_REPORT, format: 'html' }, api, { CLOUDISP_CHROMIUM_BIN: path.join(os.tmpdir(), 'no-such-chromium') });
+
+    assert.match(path.basename(result.path), /\.html$/);
+    assert.equal(result.pdf_unavailable, undefined, 'html was asked for, nothing is unavailable');
+
+    for (const extra of [{ format: 'docx' }, { kind: 'k'.repeat(81) }, { period: 'p'.repeat(121) }, { kind: 3 }]) {
+        const refused = await run('build_report', { ...VENTAS_REPORT, ...extra });
+
+        assert.equal(refused.result.outcome, 'validation_failed', JSON.stringify(extra).slice(0, 40));
+        assert.equal(refused.calls.length, 0);
+    }
+
+    assert.deepEqual(toolSchema('build_report').inputSchema.properties.format.enum, ['pdf', 'html']);
+    assert.match(toolSchema('build_report').description, /Para enviarlo, incluí la línea `media` tal cual en tu respuesta\./);
+});
+
+test('the NextScale cover without kind, period or client name shows only what it has, and a hostile title cannot break out of the CSS', () => {
+    const brand = brandFor({ data: { report_branding: { brand: 'nextscale', client_name: null }, platform: { name: ' ' } } });
+
+    assert.equal(brand.clientName, null);
+
+    const html = renderReportHtml(normalizeReport({ title: 'Informe "x" </style><script>alert(1)</script>', sections: [{ heading: 'H' }] }), new Date('2026-11-19T19:05:00Z'), brand);
+
+    assert.ok(html.includes('<p class="eyebrow">Informe &quot;x&quot; &lt;/style&gt;'), 'the title is the eyebrow when there is no kind');
+    assert.ok(html.includes('<p class="period">Corte 19/11/2026 16:05</p>'));
+    assert.equal(html.includes('Preparado para'), false);
+    assert.equal((html.match(/<\/style>/g) ?? []).length, 1);
+    assert.equal(html.includes('<script'), false);
+    assert.ok(html.includes('content:"Informe \\"x\\" \\3C /style>\\3C script>alert(1)\\3C /script>"'));
+});
+
+test('brandFor reads the brand from the envelope or its data, and anything but nextscale is the CloudISP look', async () => {
+    const branding = { brand: 'nextscale', client_name: ' NE Internet ', prepared_by: 'NextScale' };
+    const named = brandFor({ data: { report_branding: branding } });
+
+    assert.equal(named.key, 'nextscale');
+    assert.equal(named.clientName, 'NE Internet');
+    assert.equal(named.primary, '#0D1B3E');
+    assert.equal(named.accent, '#00B4D8');
+    assert.equal(named.muted, '#707B8C');
+    assert.equal(named.preparedBy, 'NextScale');
+    assert.deepEqual(named.palette, ['#0D1B3E', '#00B4D8', '#707B8C', '#5FD3E8', '#2A4A80', '#C9CEDA', '#142A52', '#9FE6F2']);
+    assert.match(named.logoSvg, /^<svg [^>]*viewBox="0 0 620 200"/);
+    assert.match(named.iconSvg, /^<svg [^>]*viewBox="0 0 120 120"/);
+    assert.equal(brandFor({ report_branding: branding }).clientName, 'NE Internet', 'a flat context works too');
+    assert.equal(brandFor({ data: { report_branding: { brand: 'nextscale', client_name: null }, platform: { name: 'NVS InterService' } } }).clientName, 'NVS InterService');
+
+    for (const context of [undefined, null, {}, { data: {} }, { data: { report_branding: { brand: null, client_name: null, prepared_by: null } } }, { data: { report_branding: { brand: 'otra' } } }]) {
+        assert.equal(brandFor(context), CLOUDISP_BRAND, JSON.stringify(context));
+    }
+});
+
+test('run_report asks for the row-level detail only when detail is true', async () => {
+    const routes = { 'GET /reports/ventas': jsonResponse({ success: true, data: { rows: [] }, detail: { data: [], totalCount: 0 } }) };
+
+    const withDetail = await run('run_report', { key: 'ventas', filters: { filter_period: '2026-11-01,2026-11-19' }, detail: true }, routes);
+
+    assert.equal(withDetail.calls[0].query.get('detail'), '1');
+    assert.equal(withDetail.calls[0].query.get('filter_period'), '2026-11-01,2026-11-19');
+
+    for (const detail of [false, undefined]) {
+        assert.equal((await run('run_report', { key: 'ventas', detail }, routes)).calls[0].query.has('detail'), false);
+    }
+
+    await assertRefused('run_report', { key: 'ventas', detail: 'maybe' });
 });

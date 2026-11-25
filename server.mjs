@@ -13,14 +13,17 @@
  */
 
 import { createHash } from 'node:crypto';
+import { statSync, unlinkSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 import { fileStamp, saveArtifact } from './lib/artifacts.mjs';
+import { brandFor, CLOUDISP_BRAND } from './lib/brands.mjs';
 import { GUIDE } from './lib/guide.mjs';
+import { htmlToPdf } from './lib/pdf.mjs';
 import { normalizeReport, renderReportHtml, ReportInputError, slugify } from './lib/report-html.mjs';
 
 const SERVER_NAME = 'cloudisp-mcp';
-const SERVER_VERSION = '0.7.0';
+const SERVER_VERSION = '0.8.0';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const API_PREFIX = '/api/v1/public';
 const REQUEST_TIMEOUT_MS = 30000;
@@ -1455,7 +1458,7 @@ async function listReports(_args, fetchImpl) {
 }
 
 /**
- * `run_report` — `GET /reports/{key}` with the report's declared filters as the query string.
+ * `run_report` — `GET /reports/{key}` with the report's declared filters as the query string (`detail: true` adds the row-level `detail`).
  *
  * @param {object} args Tool arguments.
  * @param {Function} fetchImpl `fetch`-compatible implementation.
@@ -1473,6 +1476,10 @@ async function runReport(args, fetchImpl) {
 
     if (platformId !== undefined) {
         query.platform_id = platformId;
+    }
+
+    if (optFlag(args, 'detail') === true) {
+        query.detail = 1;
     }
 
     return call(fetchImpl, 'GET', `/reports/${key}`, { query });
@@ -1555,16 +1562,58 @@ async function exportReport(args, fetchImpl, _clock, env) {
     return fetchFile(fetchImpl, env, `/reports/${key}`, query, REPORT_FORMATS[format], `reporte-${key}-${fileStamp()}.${format}`, `a ${format} file for report ${key}`);
 }
 
+/** How long `build_report` trusts the brand `GET /agent/context` named: a platform edit reaches a running bot in this time. */
+const REPORT_BRAND_TTL_MS = 15 * 60 * 1000;
+
+/** The brand answered by `GET /agent/context`, with the instant it was read. */
+let reportBrandCache = null;
+
+/** Forget the cached brand (tests). */
+export function resetReportBrandCache() {
+    reportBrandCache = null;
+}
+
 /**
- * `build_report` — render a self-contained HTML report (KPIs, tables, SVG charts) from the agent's own data; no API call.
+ * The brand of the informes of this credential: asked once to `GET /agent/context` and kept for {@link REPORT_BRAND_TTL_MS}.
+ * A context that cannot be read gives the CloudISP look and is not cached, so the next informe asks again.
+ *
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Brand, see `lib/brands.mjs`.
+ */
+async function reportBrand(fetchImpl) {
+    if (reportBrandCache !== null && Date.now() - reportBrandCache.at < REPORT_BRAND_TTL_MS) {
+        return reportBrandCache.brand;
+    }
+
+    try {
+        const response = await apiRequest(fetchImpl, 'GET', '/agent/context');
+
+        if (isFailure(response)) {
+            return CLOUDISP_BRAND;
+        }
+
+        reportBrandCache = { brand: brandFor(response.body), at: Date.now() };
+
+        return reportBrandCache.brand;
+    } catch {
+        return CLOUDISP_BRAND;
+    }
+}
+
+/** Formats `build_report` delivers. */
+const BUILD_REPORT_FORMATS = ['pdf', 'html'];
+
+/**
+ * `build_report` — render a self-contained report (KPIs, tables, SVG charts) from the agent's own data in the brand of the credential's platform
+ * and print it to PDF with headless Chromium; without Chromium (or on `format: html`) the HTML itself is the file.
  *
  * @param {object} args Tool arguments.
- * @param {Function} _fetchImpl `fetch`-compatible implementation (unused).
+ * @param {Function} fetchImpl `fetch`-compatible implementation (only `GET /agent/context`, for the brand).
  * @param {object} _clock Clock seams (unused).
- * @param {Record<string, string|undefined>} env Environment bag (artifact directory).
- * @return {Promise<object>} `{ ok, path, media, bytes }`, or a validation failure.
+ * @param {Record<string, string|undefined>} env Environment bag (artifact directory, `CLOUDISP_CHROMIUM_BIN`).
+ * @return {Promise<object>} `{ ok, path, media, bytes }` (plus `pdf_unavailable: true` when the PDF could not be made), or a validation failure.
  */
-async function buildReport(args, _fetchImpl, _clock, env) {
+async function buildReport(args, fetchImpl, _clock, env) {
     let report;
 
     try {
@@ -1577,9 +1626,27 @@ async function buildReport(args, _fetchImpl, _clock, env) {
         throw error;
     }
 
-    const { path, bytes } = saveArtifact(env, `informe-${slugify(report.title)}-${fileStamp()}.html`, renderReportHtml(report));
+    const format = optEnum(args, 'format', BUILD_REPORT_FORMATS) ?? 'pdf';
+    const brand = await reportBrand(fetchImpl);
+    const stem = `informe-${slugify(report.kind ? `${report.kind} ${report.title}` : report.title)}-${fileStamp()}`;
+    const html = saveArtifact(env, `${stem}.html`, renderReportHtml(report, new Date(), brand));
+    const htmlResult = { ok: true, path: html.path, media: `MEDIA:${html.path}`, bytes: html.bytes };
 
-    return { ok: true, path, media: `MEDIA:${path}`, bytes };
+    if (format === 'html') {
+        return htmlResult;
+    }
+
+    const pdfPath = html.path.replace(/\.html$/, '.pdf');
+
+    try {
+        await htmlToPdf(html.path, pdfPath, env);
+    } catch {
+        return { ...htmlResult, pdf_unavailable: true, message: 'No se pudo generar el PDF (falta Chromium o falló): se entrega el informe en HTML.' };
+    }
+
+    unlinkSync(html.path);
+
+    return { ok: true, path: pdfPath, media: `MEDIA:${pdfPath}`, bytes: statSync(pdfPath).size };
 }
 
 /**
@@ -2996,11 +3063,13 @@ const TOOLS = [
     readTool(
         'run_report',
         'Ejecutar reporte',
-        'Run one report from list_reports across the visible platforms (or one platform_id) and return its result.',
+        'Run one report from list_reports across the visible platforms (or one platform_id) and return its result. With detail=true the reports that have a row-level table '
+        + '(ventas, otestado) add detail {data, totalCount}: the first page of the records behind the totals.',
         {
             key: { type: 'string', description: 'Report key from list_reports.' },
             platform_id: { type: 'integer', description: 'Restrict the report to one visible platform.' },
             filters: { type: 'object', description: 'The report\'s declared filters as name/value pairs.' },
+            detail: { type: 'boolean', description: 'Add the report\'s row-level detail (first page), when it has one.' },
         },
         runReport,
         ['key'],
@@ -3024,12 +3093,16 @@ const TOOLS = [
     readTool(
         'build_report',
         'Armar informe con gráficos',
-        'Build a self-contained HTML report in Spanish from data you already read: title, sections with text, KPIs, a table (at most 200 rows) and a bar, line or donut chart. '
+        'Build a self-contained report in Spanish from data you already read: title, sections with text, KPIs, a table (at most 200 rows) and a bar, line or donut chart. '
+        + 'It comes out as a PDF in the look of the credential\'s platform (a NextScale client gets the NextScale cover, header and footer); if the PDF cannot be made the HTML comes back with pdf_unavailable: true. '
         + 'Pass identifiers (subscriber numbers, MAC) as text so they are not formatted as numbers; a null value is drawn as a gap and labelled "no disponible", never as 0. '
         + 'The file is saved locally and the answer is {ok, path, media, bytes}. Para enviarlo, incluí la línea `media` tal cual en tu respuesta.',
         {
             title: { type: 'string', description: 'Report title (at most 200 characters).' },
-            subtitle: { type: 'string', description: 'Optional subtitle, e.g. the period or the scope.' },
+            subtitle: { type: 'string', description: 'Optional subtitle, e.g. the scope.' },
+            kind: { type: 'string', description: 'Optional (at most 80 characters): the kind of informe shown on the cover above the title, e.g. "Reporte de ventas". Defaults to the title.' },
+            period: { type: 'string', description: 'Optional (at most 120 characters): the period line of the cover, e.g. "Ventas del 1 al 19 de noviembre de 2026"; the cut-off time is added to it.' },
+            format: { type: 'string', enum: BUILD_REPORT_FORMATS, description: 'pdf (default) or html.' },
             sections: {
                 type: 'array',
                 description: 'Report sections, in order (1 to 20).',
