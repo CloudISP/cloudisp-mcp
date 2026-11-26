@@ -1,0 +1,11 @@
+# Entrega al bot de Telegram los informes programados que el admin dejó en cola para el agente (instancia = slug del cliente).
+# Unidad de USUARIO (`systemctl --user`): corre como `hermes` y %h es su home, donde install.sh deja el MCP. Hace falta
+# `loginctl enable-linger hermes` una vez por host para que el timer corra sin sesión abierta.
+[Unit]
+Description=Entrega de informes programados de CloudISP (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/cloudisp-mcp/bin/cloudisp-deliver-reports %i

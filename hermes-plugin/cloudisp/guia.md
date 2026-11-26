@@ -77,7 +77,7 @@ Escribime en lenguaje natural; para un abonado usá su número, por ejemplo #123
 • **Ver qué informes hay** — ejemplo: «¿Qué informes me podés dar?»
 • **Consultar un informe** — ejemplo: «Resumime las órdenes de trabajo de este mes»
 • **Descargar un informe en PDF o CSV** — ejemplo: «Haceme un informe PDF de órdenes de trabajo de este mes»
-• **Armar un informe con gráficos (HTML)** — ejemplo: «Haceme un informe con gráfico del consumo de una PON»
+• **Armar un informe con gráficos (PDF)** — ejemplo: «Haceme un informe con gráfico del consumo de una PON»
 
 **Conocimiento**
 • **Buscar en la base de conocimiento** — ejemplo: «¿Cómo se resuelve un abonado sin IP?»

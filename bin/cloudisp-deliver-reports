@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Deliver the scheduled reports queued for one agent to its Telegram chats (scripts/deliver-reports.mjs).
+#
+# Usage: cloudisp-deliver-reports <slug>
+#
+# The environment file is ~/.config/cloudisp-mcp/<slug>.env (override the directory with CLOUDISP_MCP_CONFIG_DIR), the one
+# new-tenant.sh writes: CLOUDISP_API_BASE, CLOUDISP_API_KEY, CLOUDISP_TELEGRAM_BOT_TOKEN and CLOUDISP_REPORT_CHAT_IDS. Like
+# bin/cloudisp-mcp, a 1Password op:// reference in it is resolved through `op run`; otherwise the file is sourced directly.
+set -euo pipefail
+
+SLUG="${1:-}"
+[[ "$SLUG" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || { echo "cloudisp-deliver-reports: usage: cloudisp-deliver-reports <slug>" >&2; exit 1; }
+
+CFG_DIR="${CLOUDISP_MCP_CONFIG_DIR:-$HOME/.config/cloudisp-mcp}"
+ENV_FILE="$CFG_DIR/$SLUG.env"
+SRC="$0"; while [ -L "$SRC" ]; do DIR="$(cd -P "$(dirname "$SRC")" && pwd)"; SRC="$(readlink "$SRC")"; case "$SRC" in /*) ;; *) SRC="$DIR/$SRC";; esac; done
+ROOT="$(cd -P "$(dirname "$SRC")/.." && pwd)"
+# A systemd user manager starts with a minimal PATH: node and op usually live under ~/.local/bin or /usr/local/bin.
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+# What was already sent to which chat, so a retry after a partial failure does not repeat it.
+export CLOUDISP_REPORT_STATE="${CLOUDISP_REPORT_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cloudisp-mcp/$SLUG-report-deliveries.json}"
+
+command -v node >/dev/null || { echo "cloudisp-deliver-reports: node >= 18 is required" >&2; exit 1; }
+[ -r "$ENV_FILE" ] || { echo "cloudisp-deliver-reports: missing $ENV_FILE" >&2; exit 1; }
+if grep -q '=op://' "$ENV_FILE"; then
+    command -v op >/dev/null || { echo "cloudisp-deliver-reports: $ENV_FILE holds an op:// reference but the 1Password CLI (op) is not installed" >&2; exit 1; }
+    exec op run --env-file "$ENV_FILE" -- node "$ROOT/scripts/deliver-reports.mjs"
+fi
+set -a; . "$ENV_FILE"; set +a; exec node "$ROOT/scripts/deliver-reports.mjs"
