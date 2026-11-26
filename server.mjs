@@ -20,7 +20,7 @@ import { GUIDE } from './lib/guide.mjs';
 import { normalizeReport, renderReportHtml, ReportInputError, slugify } from './lib/report-html.mjs';
 
 const SERVER_NAME = 'cloudisp-mcp';
-const SERVER_VERSION = '0.6.0';
+const SERVER_VERSION = '0.7.0';
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const API_PREFIX = '/api/v1/public';
 const REQUEST_TIMEOUT_MS = 30000;
@@ -44,6 +44,12 @@ const REQUESTED_BY_HEADER = 'X-CloudISP-Requested-By';
 const CHANNEL_HEADER = 'X-CloudISP-Channel';
 const CONVERSATION_HEADER = 'X-CloudISP-Conversation';
 const TOOL_HEADER = 'X-CloudISP-Tool';
+
+/**
+ * The Telegram user the call is made for (`telegram:<numeric id>`): the admin, for a key with `actor:delegate`, acts as the
+ * employee mapped to that id instead of the key's fixed actor, and refuses the request when no employee is mapped.
+ */
+const ON_BEHALF_OF_HEADER = 'X-CloudISP-On-Behalf-Of';
 const REQUESTED_BY_MAX_LENGTH = 120;
 const CONVERSATION_MAX_LENGTH = 128;
 
@@ -354,6 +360,11 @@ function identityHeaders(tool, operator) {
 
         if (OPERATOR_CHANNELS.includes(operator.channel)) {
             headers[CHANNEL_HEADER] = operator.channel;
+        }
+
+        // Only a numeric Telegram user id names an employee; the operator comes from the agent plugin, never from the model (see README, "Identidad del operador").
+        if (/^telegram:[0-9]{1,20}$/.test(operator.ref)) {
+            headers[ON_BEHALF_OF_HEADER] = operator.ref;
         }
 
         if (operator.conversation !== '') {
@@ -1467,6 +1478,34 @@ async function runReport(args, fetchImpl) {
     return call(fetchImpl, 'GET', `/reports/${key}`, { query });
 }
 
+/**
+ * GET a file from the API, save it as an artifact and hand back its `MEDIA:` line.
+ *
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {Record<string, string|undefined>} env Environment bag (artifact directory).
+ * @param {string} apiPath Path below `/api/v1/public`.
+ * @param {object} query Query string.
+ * @param {string} contentType Content type the API must answer (`application/pdf`, `text/csv`).
+ * @param {string} name Artifact file name.
+ * @param {string} what What was asked for, for the `unexpected_response` message.
+ * @return {Promise<object>} `{ ok, path, media, bytes }`; fails with the API payload or `unexpected_response`.
+ */
+async function fetchFile(fetchImpl, env, apiPath, query, contentType, name, what) {
+    const response = await apiRequest(fetchImpl, 'GET', apiPath, { query, binary: true });
+
+    if (isFailure(response)) {
+        fail(apiFailurePayload(response));
+    }
+
+    if (!Buffer.isBuffer(response.bytes) || !response.contentType.includes(contentType)) {
+        fail({ error: 'unexpected_response', message: `The API did not answer ${what}.` });
+    }
+
+    const { path, bytes } = saveArtifact(env, name, response.bytes);
+
+    return { ok: true, path, media: `MEDIA:${path}`, bytes };
+}
+
 /** Formats `export_report` can ask the API for, with the content type each must come back as. */
 const REPORT_FORMATS = { pdf: 'application/pdf', csv: 'text/csv' };
 
@@ -1513,19 +1552,7 @@ async function exportReport(args, fetchImpl, _clock, env) {
         query.filter_period = `${dates.from},${dates.to}`;
     }
 
-    const response = await apiRequest(fetchImpl, 'GET', `/reports/${key}`, { query, binary: true });
-
-    if (isFailure(response)) {
-        fail(apiFailurePayload(response));
-    }
-
-    if (!Buffer.isBuffer(response.bytes) || !response.contentType.includes(REPORT_FORMATS[format])) {
-        fail({ error: 'unexpected_response', message: `The API did not answer a ${format} file for report ${key}.` });
-    }
-
-    const { path, bytes } = saveArtifact(env, `reporte-${key}-${fileStamp()}.${format}`, response.bytes);
-
-    return { ok: true, path, media: `MEDIA:${path}`, bytes };
+    return fetchFile(fetchImpl, env, `/reports/${key}`, query, REPORT_FORMATS[format], `reporte-${key}-${fileStamp()}.${format}`, `a ${format} file for report ${key}`);
 }
 
 /**
@@ -1620,6 +1647,78 @@ async function getAccountStatement(args, fetchImpl) {
     const subscriberId = await resolveSubscriberId(fetchImpl, args);
 
     return call(fetchImpl, 'GET', `/subscribers/${subscriberId}/account-statement`, { query });
+}
+
+/**
+ * `get_subscriber_billing` — `GET /subscribers/{id}/billing`: the billing tab (modality, price, discounts, cutoff override, debt).
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function getSubscriberBilling(args, fetchImpl) {
+    return call(fetchImpl, 'GET', `/subscribers/${await resolveSubscriberId(fetchImpl, args)}/billing`);
+}
+
+/** Most rows `list_subscriber_payments` and `get_subscriber_audit` can ask for (the API maximum). */
+const HISTORY_LIMIT_MAX = 100;
+
+/**
+ * `list_subscriber_payments` — `GET /subscribers/{id}/payments`, newest first.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function listSubscriberPayments(args, fetchImpl) {
+    const limit = optLimit(args, HISTORY_LIMIT_MAX);
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'GET', `/subscribers/${subscriberId}/payments`, { query: { limit } });
+}
+
+/**
+ * `get_subscriber_audit` — `GET /subscribers/{id}/audit`, newest first.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function getSubscriberAudit(args, fetchImpl) {
+    const limit = optLimit(args, HISTORY_LIMIT_MAX);
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'GET', `/subscribers/${subscriberId}/audit`, { query: { limit } });
+}
+
+/**
+ * `get_invoice_pdf` — `GET /invoices/{id}/pdf`: save the PDF and hand back its `MEDIA:` line.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {object} _clock Clock seams (unused).
+ * @param {Record<string, string|undefined>} env Environment bag (artifact directory).
+ * @return {Promise<object>} `{ ok, path, media, bytes }`, or a failure payload.
+ */
+async function getInvoicePdf(args, fetchImpl, _clock, env) {
+    const id = requireId(args, 'invoice_id');
+
+    return fetchFile(fetchImpl, env, `/invoices/${id}/pdf`, {}, 'application/pdf', `factura-${id}-${fileStamp()}.pdf`, `a PDF for invoice ${id}`);
+}
+
+/**
+ * `get_payment_receipt` — `GET /payments/{id}/receipt`: save the receipt PDF and hand back its `MEDIA:` line.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @param {object} _clock Clock seams (unused).
+ * @param {Record<string, string|undefined>} env Environment bag (artifact directory).
+ * @return {Promise<object>} `{ ok, path, media, bytes }`, or a failure payload.
+ */
+async function getPaymentReceipt(args, fetchImpl, _clock, env) {
+    const id = requireId(args, 'payment_id');
+
+    return fetchFile(fetchImpl, env, `/payments/${id}/receipt`, {}, 'application/pdf', `recibo-${id}-${fileStamp()}.pdf`, `a receipt PDF for payment ${id}`);
 }
 
 /** Currencies an invoice, and so a debt, can be in (`ck_billing_invoices_currency`). */
@@ -2145,6 +2244,245 @@ async function createWorkOrder(args, fetchImpl) {
     }
 
     return call(fetchImpl, 'POST', '/work-orders', { body, idempotencyKey });
+}
+
+/** Payment methods `record_payment` accepts. */
+const PAYMENT_METHODS = ['cash', 'transfer', 'other'];
+
+/** Modalities the bot may set; `no_billing` is the fourth and only a person sets it from the admin. */
+const BILLING_MODALITIES = ['plan', 'dedicated_discount', 'no_cut'];
+
+/** Reasons of a `no_cut` modality (`SubscriberBillingSettings::EXEMPT_REASONS`). */
+const NO_CUT_REASONS = ['office', 'partner', 'school', 'courtesy', 'employee', 'other'];
+
+/** Kinds of a dedicated discount. */
+const DISCOUNT_KINDS = ['percent', 'fixed'];
+
+/** Reasons a cut date may be moved (`SubscriberBillingSettings::OVERRIDE_REASONS`). */
+const CUTOFF_OVERRIDE_REASONS = ['holiday', 'promise', 'other'];
+
+/** Fields `update_subscriber_contact` can change. */
+const CONTACT_FIELDS = ['phone', 'email', 'address', 'city'];
+
+/**
+ * Read an amount of pesos (never cents) and normalise it to the decimal string the admin form takes.
+ *
+ * @param {unknown} value Number or numeric string, at most 2 decimals.
+ * @param {string} name Argument name for the message.
+ * @param {boolean} [allowZero] Whether 0 is accepted.
+ * @return {string} The amount with exactly 2 decimals, e.g. `12500.50`.
+ */
+function requirePesos(value, name, allowZero = false) {
+    const text = typeof value === 'number' ? String(value) : asTrimmedString(value);
+
+    if (!/^\d{1,9}(\.\d{1,2})?$/.test(text) || (!allowZero && Number(text) === 0)) {
+        fail(invalid(`${name} must be an amount in pesos (not cents) with at most 2 decimals, e.g. 12500.50${allowZero ? '' : ', and greater than 0'}.`));
+    }
+
+    return Number(text).toFixed(2);
+}
+
+/**
+ * @param {unknown} value Candidate.
+ * @param {string} name Argument name for the message.
+ * @return {string} The date as `YYYY-MM-DD`.
+ */
+function requireDate(value, name) {
+    const text = asTrimmedString(value);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(`${text}T00:00:00Z`)) || new Date(`${text}T00:00:00Z`).toISOString().slice(0, 10) !== text) {
+        fail(invalid(`${name} must be a real date as YYYY-MM-DD.`));
+    }
+
+    return text;
+}
+
+/**
+ * @param {object} args Tool arguments.
+ * @param {string} key Argument name.
+ * @param {number} max Longest accepted text.
+ * @return {string} The required trimmed text.
+ */
+function requireText(args, key, max) {
+    const text = asTrimmedString(args[key]);
+
+    if (text === '' || text.length > max) {
+        fail(invalid(`${key} is required (1 to ${max} characters).`));
+    }
+
+    return text;
+}
+
+/**
+ * @param {object} args Tool arguments.
+ * @param {string} key Argument name.
+ * @param {string[]} allowed Accepted values.
+ * @return {string} The value, which is required.
+ */
+function requireEnum(args, key, allowed) {
+    return optEnum(args, key, allowed) ?? fail(invalid(`${key} is required: one of ${allowed.join(', ')}.`));
+}
+
+/**
+ * `record_payment` — `POST /subscribers/{id}/payments`; answers the payment and its `receipt_number`.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function recordPayment(args, fetchImpl) {
+    const idempotencyKey = requireIdempotencyKey(args);
+    const body = { amount: requirePesos(args.amount, 'amount'), method: requireEnum(args, 'method', PAYMENT_METHODS) };
+
+    if (isPresent(args.reference)) {
+        body.reference = requireText(args, 'reference', 120);
+    }
+
+    if (isPresent(args.received_at)) {
+        body.received_at = asTrimmedString(args.received_at);
+
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(body.received_at)) {
+            fail(invalid('received_at must be a wall time of Argentina as YYYY-MM-DDTHH:MM.'));
+        }
+    }
+
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'POST', `/subscribers/${subscriberId}/payments`, { body, idempotencyKey });
+}
+
+/**
+ * The body of `set_billing_modality`; each modality takes only its own fields.
+ *
+ * @param {object} args Tool arguments.
+ * @return {object} `{ modality, ...fields }`.
+ */
+function modalityBody(args) {
+    const modality = asTrimmedString(args.modality);
+
+    if (modality === 'no_billing') {
+        fail({ error: 'human_only', message: 'Sin facturación (no_billing) solo la puede fijar una persona desde el admin de CloudISP; nada se cambió.' });
+    }
+
+    if (!BILLING_MODALITIES.includes(modality)) {
+        fail(invalid(`modality must be one of: ${BILLING_MODALITIES.join(', ')}.`));
+    }
+
+    if (modality === 'plan') {
+        return { modality };
+    }
+
+    if (modality === 'no_cut') {
+        const body = { modality, reason: requireEnum(args, 'reason', NO_CUT_REASONS) };
+
+        return isPresent(args.note) ? { ...body, note: requireText(args, 'note', 240) } : body;
+    }
+
+    const kind = requireEnum(args, 'kind', DISCOUNT_KINDS);
+    const body = { modality, kind, reason: requireText(args, 'reason', 240) };
+    const percent = Number(args.value);
+
+    if (kind === 'percent') {
+        if (!Number.isInteger(percent) || percent < 1 || percent > 100) {
+            fail(invalid('value of a percent discount must be a whole number from 1 to 100.'));
+        }
+
+        body.value = percent;
+    } else {
+        body.value = requirePesos(args.value, 'value');
+    }
+
+    // The model does not know today's date reliably: the server day in Argentina is the default start.
+    const today = fileStamp().slice(0, 8);
+
+    body.starts_on = isPresent(args.starts_on) ? requireDate(args.starts_on, 'starts_on') : `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6, 8)}`;
+
+    if (isPresent(args.ends_on)) {
+        body.ends_on = requireDate(args.ends_on, 'ends_on');
+
+        if (body.ends_on < body.starts_on) {
+            fail(invalid('ends_on cannot be before starts_on.'));
+        }
+    }
+
+    return body;
+}
+
+/**
+ * `set_billing_modality` — `POST /subscribers/{id}/billing/modality`: plan, dedicated discount or no cut.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function setBillingModality(args, fetchImpl) {
+    const idempotencyKey = requireIdempotencyKey(args);
+    const body = modalityBody(args);
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'POST', `/subscribers/${subscriberId}/billing/modality`, { body, idempotencyKey });
+}
+
+/**
+ * `set_price_override` — `POST /subscribers/{id}/billing/price`; `price: null` goes back to the plan price.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function setPriceOverride(args, fetchImpl) {
+    const idempotencyKey = requireIdempotencyKey(args);
+
+    if (!Object.hasOwn(args, 'price')) {
+        fail(invalid('price is required: an amount in pesos, or null to use the plan price again.'));
+    }
+
+    const price = args.price === null ? null : requirePesos(args.price, 'price', true);
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'POST', `/subscribers/${subscriberId}/billing/price`, { body: { price }, idempotencyKey });
+}
+
+/**
+ * `set_cutoff_override` — `POST /subscribers/{id}/billing/cutoff-override`; `date: null` restores the usual cut day.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function setCutoffOverride(args, fetchImpl) {
+    const idempotencyKey = requireIdempotencyKey(args);
+
+    if (!Object.hasOwn(args, 'date')) {
+        fail(invalid('date is required: a day of the current month as YYYY-MM-DD, or null to restore the usual cut day.'));
+    }
+
+    const body = args.date === null
+        ? { date: null, reason: null }
+        : { date: requireDate(args.date, 'date'), reason: requireEnum(args, 'reason', CUTOFF_OVERRIDE_REASONS) };
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'POST', `/subscribers/${subscriberId}/billing/cutoff-override`, { body, idempotencyKey });
+}
+
+/**
+ * `update_subscriber_contact` — `PATCH /subscribers/{id}/contact` with the given subset of phone, email, address and city.
+ *
+ * @param {object} args Tool arguments.
+ * @param {Function} fetchImpl `fetch`-compatible implementation.
+ * @return {Promise<object>} Public API envelope.
+ */
+async function updateSubscriberContact(args, fetchImpl) {
+    const idempotencyKey = requireIdempotencyKey(args);
+    const body = Object.fromEntries(CONTACT_FIELDS.filter((field) => isPresent(args[field])).map((field) => [field, requireText(args, field, 255)]));
+
+    if (Object.keys(body).length === 0) {
+        fail(invalid(`Provide at least one of: ${CONTACT_FIELDS.join(', ')}.`));
+    }
+
+    const subscriberId = await resolveSubscriberId(fetchImpl, args);
+
+    return call(fetchImpl, 'PATCH', `/subscribers/${subscriberId}/contact`, { body, idempotencyKey });
 }
 
 /**
@@ -2804,6 +3142,52 @@ const TOOLS = [
         getAccountStatement,
     ),
     readTool(
+        'get_subscriber_billing',
+        'Ver facturación de un abonado',
+        'Billing tab of one subscriber: modality (plan, dedicated_discount, no_cut or no_billing), the plan price and the price override, the active discounts, '
+        + 'the cut date override and the account standing. Amounts are cents. Read it before changing anything about how the subscriber is billed.',
+        SUBSCRIBER_PROPERTIES,
+        getSubscriberBilling,
+    ),
+    readTool(
+        'list_subscriber_payments',
+        'Listar pagos de un abonado',
+        'Payments of one subscriber, newest first (amount_cents, currency, method, origin, received_at, receipt number; never a payment memo). Use payment_id from here for get_payment_receipt.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            limit: { type: 'integer', description: `Most payments to return (API maximum ${HISTORY_LIMIT_MAX}).` },
+        },
+        listSubscriberPayments,
+    ),
+    readTool(
+        'get_subscriber_audit',
+        'Ver historial de un abonado',
+        'Audit trail of one subscriber, newest first: occurred_at, category, message, the action and who did it (billing changes, payments, plan and contact edits, cuts). Default 50 entries.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            limit: { type: 'integer', description: `Most entries to return (default 50, API maximum ${HISTORY_LIMIT_MAX}).` },
+        },
+        getSubscriberAudit,
+    ),
+    readTool(
+        'get_invoice_pdf',
+        'Descargar factura en PDF',
+        'Download the PDF of one invoice or receipt of account (invoice_id from list_invoices). The file is saved locally and the answer is {ok, path, media, bytes}. '
+        + 'Para enviarlo, incluí la línea `media` tal cual en tu respuesta.',
+        { invoice_id: { type: 'integer', description: 'Invoice id, from list_invoices.' } },
+        getInvoicePdf,
+        ['invoice_id'],
+    ),
+    readTool(
+        'get_payment_receipt',
+        'Descargar recibo de un pago',
+        'Download the receipt PDF of one payment (payment_id from list_subscriber_payments or the record_payment answer). The file is saved locally and the answer is {ok, path, media, bytes}. '
+        + 'Para enviarlo, incluí la línea `media` tal cual en tu respuesta.',
+        { payment_id: { type: 'integer', description: 'Payment id, from list_subscriber_payments.' } },
+        getPaymentReceipt,
+        ['payment_id'],
+    ),
+    readTool(
         'list_debtors',
         'Listar deudores',
         'Subscribers with debt (issued invoices minus payments), one row per subscriber AND currency (currency, debt_cents), by currency and then debt descending: '
@@ -3239,6 +3623,77 @@ const TOOLS = [
         ['network_onu_id', 'serial', 'mac'],
         swapOnu,
     ),
+    writeTool(
+        'record_payment',
+        'Registrar pago',
+        'Record a payment received from a subscriber and answer the payment with its receipt_number (get_payment_receipt downloads the receipt). The amount is in PESOS, never cents '
+        + '(12500.50 means $12.500,50) and it is applied to the oldest open invoices. Confirm the amount and the method with the operator before calling; a payment cannot be voided from here.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            amount: { type: ['number', 'string'], description: 'Amount in pesos (not cents), greater than 0, at most 2 decimals, e.g. 12500.50.' },
+            method: { type: 'string', enum: PAYMENT_METHODS, description: 'cash, transfer or other.' },
+            reference: { type: 'string', description: 'Optional reference, up to 120 characters (transfer number, receipt book page).' },
+            received_at: { type: 'string', description: 'Optional, when it was received as YYYY-MM-DDTHH:MM in Argentina time. Default: now.' },
+        },
+        ['amount', 'method'],
+        recordPayment,
+    ),
+    writeTool(
+        'set_billing_modality',
+        'Cambiar modalidad de facturación',
+        'Set how one subscriber is billed: plan (the plan price or the individual price), dedicated_discount (a discount of their own: kind percent or fixed, value, reason; '
+        + 'starts_on defaults to today), or no_cut (billed as usual, never cut: reason from the list, optional note). Any change revokes the discount in force. '
+        + 'Sin facturación (no_billing) cannot be set from here: only a person does it in the admin; tell the operator so.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            modality: { type: 'string', enum: BILLING_MODALITIES, description: 'Target modality.' },
+            kind: { type: 'string', enum: DISCOUNT_KINDS, description: 'dedicated_discount only: percent (whole percent) or fixed (pesos off the monthly price).' },
+            value: { type: ['number', 'string'], description: 'dedicated_discount only: 1 to 100 for percent, pesos (not cents) for fixed.' },
+            starts_on: { type: 'string', description: 'dedicated_discount only: first day it applies, YYYY-MM-DD. Default today.' },
+            ends_on: { type: 'string', description: 'dedicated_discount only: last day it applies, YYYY-MM-DD. Default: no end.' },
+            reason: { type: 'string', description: `dedicated_discount: why, up to 240 characters. no_cut: one of ${NO_CUT_REASONS.join(', ')}.` },
+            note: { type: 'string', description: 'no_cut only: optional note, up to 240 characters.' },
+        },
+        ['modality'],
+        setBillingModality,
+    ),
+    writeTool(
+        'set_price_override',
+        'Fijar precio especial',
+        'Set the individual monthly price of the subscriber\'s active contract, in PESOS (not cents), or null to use the plan price again. It changes what the next invoices charge.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            price: { type: ['number', 'string', 'null'], description: 'Monthly price in pesos (0 or more, at most 2 decimals), or null for the plan price.' },
+        },
+        ['price'],
+        setPriceOverride,
+    ),
+    writeTool(
+        'set_cutoff_override',
+        'Mover fecha de corte',
+        'Move the debt cut date of one subscriber within the current month (date YYYY-MM-DD, today or later, with a reason), or restore the usual cut day with date null.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            date: { type: ['string', 'null'], description: 'New cut date YYYY-MM-DD in the current month, or null to restore the usual day.' },
+            reason: { type: 'string', enum: CUTOFF_OVERRIDE_REASONS, description: 'Required with a date: holiday, promise or other.' },
+        },
+        ['date'],
+        setCutoffOverride,
+    ),
+    writeTool(
+        'update_subscriber_contact',
+        'Actualizar datos de contacto',
+        'Update the contact data of one subscriber: any of phone, email, address and city (only the given ones change). Never echo the phone or e-mail back in the chat.',
+        {
+            ...SUBSCRIBER_PROPERTIES,
+            phone: { type: 'string', description: 'New phone.' },
+            email: { type: 'string', description: 'New e-mail.' },
+            address: { type: 'string', description: 'New address.' },
+            city: { type: 'string', description: 'New city.' },
+        },
+        [],
+        updateSubscriberContact,
+    ),
 ];
 
 // Every tool carries its user-facing catalogue entry (see lib/guide.mjs); the tests fail when one is missing.
@@ -3373,6 +3828,7 @@ const OUTCOME_HINTS = {
     task_failed: 'La tarea falló en el equipo: informá el motivo y ofrecé la alternativa (reinicio u OT); no reintentes solo.',
     device_error: 'La tarea terminó pero el equipo NO quedó como se pidió (ver error/reason): decí que FALLÓ y el motivo, nunca "sincronizado"; ofrecé la alternativa (reinicio u OT de visita); no reintentes solo.',
     pppoe_pass_invalid: 'La contraseña PPPoE guardada del abonado no es válida y NO se tocó nada. Pedile al operador que confirme explícitamente rotarla (cambia la contraseña PPPoE del abonado) o que la corrija; solo con su confirmación repetí la llamada con rotate_pppoe_password true.',
+    human_only: 'Eso solo lo puede hacer una persona desde el admin de CloudISP: decíselo al operador y no reintentes.',
 };
 
 /**

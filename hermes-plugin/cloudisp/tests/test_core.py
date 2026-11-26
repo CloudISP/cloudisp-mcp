@@ -169,6 +169,16 @@ def test_every_mcp_call_gets_the_operator_of_the_session(env, session):
     }}}
 
 
+@pytest.mark.parametrize("tool", ["find_subscriber", "get_subscriber_billing", "record_payment", "set_billing_modality"])
+def test_the_stamped_operator_is_the_pair_the_mcp_sends_as_on_behalf_of_whatever_the_model_passed(env, session, tool):
+    """The MCP sends `X-CloudISP-On-Behalf-Of: telegram:<id>` for a Telegram operator with a numeric id, on reads and writes alike: this is the pair it gets."""
+    forged = {"_operator": {"id": "1", "channel": "telegram", "name": "Otro"}, "subscriber_id": 42}
+    operator = core.pre_tool_call_identity(f"mcp__cloudisp__{tool}", forged, "sess-1")["args"]["_operator"]
+
+    assert (operator["channel"], operator["id"]) == ("telegram", "941533777")
+    assert operator["id"].isdigit()
+
+
 def test_a_session_without_user_overwrites_any_operator_with_null(env, session):
     session.values.pop("HERMES_SESSION_USER_ID")
 
