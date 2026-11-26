@@ -116,6 +116,37 @@ test('one delivery to two chats is two documents and one ack, and no credential 
     assert.equal(net.calls.filter((call) => call.url.includes('telegram')).every((call) => call.headers.Authorization === undefined), true);
 });
 
+test('a same-origin download gets the API Authorization header', async () => {
+    const delivery = { ...DELIVERY, download_url: `${API_BASE}/api/v1/public/agent/report-deliveries/7/file` };
+    const net = network({ deliveries: [delivery] });
+
+    const fetchWithSameOriginFile = async (url, init = {}) => {
+        if (String(url) === delivery.download_url) {
+            net.calls.push({ method: init.method ?? 'GET', url: String(url), headers: init.headers ?? {} });
+
+            return new Response(PDF);
+        }
+
+        return net.fetchImpl(url, init);
+    };
+
+    assert.deepEqual(await deliverReports({ env: ENV, fetchImpl: fetchWithSameOriginFile, log: net.log }), { delivered: 1, pending: 0 });
+    const download = net.calls.find((call) => call.url === delivery.download_url);
+
+    assert.equal(download.headers.Authorization, `Bearer ${API_KEY}`);
+});
+
+
+
+test('a foreign-origin download never gets the API Authorization header', async () => {
+    const net = network();
+
+    assert.deepEqual(await deliverReports({ env: ENV, fetchImpl: net.fetchImpl, log: net.log }), { delivered: 1, pending: 0 });
+    const download = net.calls.find((call) => call.url === DELIVERY.download_url);
+
+    assert.equal(download.headers.Authorization, undefined);
+});
+
 test('a chat that refuses keeps the delivery queued with no ack, and the retry only resends to that chat', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudisp-delivery-'));
     const env = { ...ENV, CLOUDISP_REPORT_STATE: path.join(dir, 'state', 'deliveries.json') };

@@ -163,8 +163,10 @@ export async function deliverReports({ env = process.env, fetchImpl = globalThis
             let bytes;
 
             try {
-                // The file host is object storage with a signed URL: it gets no credentials of ours.
-                const file = await fetchImpl(delivery.download_url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+                // Object storage gets no credentials; only the API origin receives the bearer key.
+                const downloadUrl = new URL(delivery.download_url);
+                const sameOrigin = downloadUrl.origin === new URL(config.base).origin;
+                const file = await fetchImpl(delivery.download_url, { headers: sameOrigin ? auth : undefined, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
 
                 if (!file.ok) {
                     throw new Error(`HTTP ${file.status}`);
